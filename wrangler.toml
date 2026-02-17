@@ -1,4 +1,4 @@
-name = "simplenews-backend"
+name = "rss-aggregator"
 main = "worker.js"
 compatibility_date = "2026-02-16"
 
