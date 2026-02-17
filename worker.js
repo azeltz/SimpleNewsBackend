@@ -195,7 +195,7 @@ function parseItems(xml, feed) {
 async function fetchFeedIfDue(env, feed) {
   const now = Date.now();
   const lastKey = `last:${feed.id}`;
-  const lastStr = await env.SIMPLE_RSS_BINDING.get(lastKey);
+  const lastStr = await env.SIMPLE_RSS_CACHE.get(lastKey);
   const last = lastStr ? parseInt(lastStr, 10) : 0;
 
   const intervalMs = getIntervalMinutes(feed) * 60 * 1000;
@@ -213,17 +213,17 @@ async function fetchFeedIfDue(env, feed) {
   const xml = await resp.text();
   console.log("RSS fetched OK", feed.id, xml.slice(0, 200));
 
-  await env.SIMPLE_RSS_BINDING.put(`rss:${feed.id}`, xml, {
+  await env.SIMPLE_RSS_CACHE.put(`rss:${feed.id}`, xml, {
     expirationTtl: 60 * 60 * 12,
   });
-  await env.SIMPLE_RSS_BINDING.put(lastKey, now.toString());
+  await env.SIMPLE_RSS_CACHE.put(lastKey, now.toString());
 }
 
 async function aggregateAllFromKV(env) {
   let all = [];
 
   for (const feed of FEEDS) {
-    const xml = await env.SIMPLE_RSS_BINDING.get(`rss:${feed.id}`);
+    const xml = await env.SIMPLE_RSS_CACHE.get(`rss:${feed.id}`);
     if (!xml) continue;
 
     const items = parseItems(xml, feed);
