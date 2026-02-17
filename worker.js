@@ -53,8 +53,8 @@ const INTERVALS = {
   periodic:   { minutes: 60 },
   social:     { minutes: 10000000 },
 
-  // time-based kind: once per day at 12:00 UTC
-  morning_daily: { timeUTC: "12:00" },
+  // time-based kind: once per day at 12:30 UTC
+  morning_daily: { timeUTC: "12:30" },
 };
 
 function getScheduleForFeed(feed) {
