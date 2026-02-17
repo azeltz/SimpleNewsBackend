@@ -1,13 +1,3 @@
-/**
- * Welcome to Cloudflare Workers! This is your first worker.
- *
- * - Run "npm run dev" in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run "npm run deploy" to publish your worker
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
-
 // ---- FEED CONFIG ----
 
 const NITTER_BASE = "https://nitter.net";
@@ -45,30 +35,6 @@ const FEEDS = [
   { id: "yahoo_sports", url: "https://sports.yahoo.com/general/news/rss/",   source: "sports.yahoo.com",    kind: "top" },
   { id: "front_office_sports", url: "https://frontofficesports.com/feed/",   source: "frontofficesports.com", kind: "periodic" },
   { id: "eurohoops",  url: "https://www.eurohoops.net/en/feed/",             source: "eurohoops.net",       kind: "consistent" },
-
-  // Nitter personalities (social, very time‑sensitive)
-  //{ id: "x_shams",    url: "${NITTER_BASE}/ShamsCharania/rss",          source: "x.com",               kind: "social" },
-  //{ id: "x_fabrizio", url: "${NITTER_BASE}/fabrizioromano/rss",         source: "x.com",               kind: "social" },
-  //{ id: "x_schefter", url: "${NITTER_BASE}/adamschefter/rss",           source: "x.com",               kind: "social" },
-  //{ id: "x_modai",    url: "${NITTER_BASE}/Yoav_Modai/rss",             source: "x.com",               kind: "social" },
-  //{ id: "x_raz_amir", url: "${NITTER_BASE}/razamir29/rss",              source: "x.com",               kind: "social" },
-
-  // Nitter orgs
-  //{ id: "x_standwithus", url: "${NITTER_BASE}/standwithus/rss",         source: "x.com",               kind: "social" },
-
-  // Nitter sports teams / fan accounts
-  //{ id: "x_mavs",     url: "${NITTER_BASE}/dallasmavs/rss",             source: "x.com",               kind: "social" },
-  //{ id: "x_aggie_fb", url: "${NITTER_BASE}/aggiefootball/rss",          source: "x.com",               kind: "social" },
-  //{ id: "x_aggie_mb", url: "${NITTER_BASE}/aggiembk/rss",               source: "x.com",               kind: "social" },
-  //{ id: "x_maccabi_fc", url: "${NITTER_BASE}/maccabitlvfc/rss",         source: "x.com",               kind: "social" },
-  //{ id: "x_maccabi_bc", url: "${NITTER_BASE}/maccabitlvbc/rss",         source: "x.com",               kind: "social" },
-  //{ id: "x_12thman",  url: "${NITTER_BASE}/12thman/rss",                source: "x.com",               kind: "social" },
-  //{ id: "x_tamu",     url: "${NITTER_BASE}/tamu/rss",                   source: "x.com",               kind: "social" },
-  //{ id: "x_manutd",   url: "${NITTER_BASE}/manutd/rss",                 source: "x.com",               kind: "social" },
-  //{ id: "x_barca",    url: "${NITTER_BASE}/fcbarcelona/rss",            source: "x.com",               kind: "social" },
-  //{ id: "x_fcdallas", url: "${NITTER_BASE}/fcdallas/rss",               source: "x.com",               kind: "social" },
-  //{ id: "x_usmntonly",url: "${NITTER_BASE}/usmntonly/rss",              source: "x.com",               kind: "social" },
-  //{ id: "x_wtfstats", url: "${NITTER_BASE}/wtfstats/rss",               source: "x.com",               kind: "social" },
 ];
 
 // Interval (in minutes) per feed kind
@@ -127,16 +93,15 @@ function cleanCData(text) {
   if (!text) return null;
 
   let cleaned = text
-    .replace(/^<!\[CDATA\[/i, "")   // leading CDATA
-    .replace(/\]\]>$/i, "")        // trailing CDATA
-    .replace(/\\u003C/gi, "<") // remove <![CDATA[ ... ]]>
-    .replace(/\\u003E/gi, ">"); // leading CDATA
+    .replace(/^<!\[CDATA\[/i, "")
+    .replace(/\]\]>$/i, "")
+    .replace(/\\u003C/gi, "<")
+    .replace(/\\u003E/gi, ">");
 
   cleaned = cleaned.replace(/^<!\[CDATA\[/i, "").replace(/\]\]>$/i, "");
-  cleaned = cleaned.replace(/<\/?[^>]+>/g, ""); // strip tags
+  cleaned = cleaned.replace(/<\/?[^>]+>/g, "");
   return cleaned.trim();
 }
-
 
 function extractTag(text, tag) {
   const regex = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "i");
@@ -146,7 +111,6 @@ function extractTag(text, tag) {
 
 function extractFirstImageSrc(htmlLike) {
   if (!htmlLike) return null;
-  // handle CDATA + <img ... src="...">
   const imgMatch = htmlLike.match(/<img[^>]+src="([^"]+)"/i);
   return imgMatch ? imgMatch[1] : null;
 }
@@ -200,14 +164,21 @@ async function fetchFeedIfDue(env, feed) {
 
   const intervalMs = getIntervalMinutes(feed) * 60 * 1000;
 
+  // Not due yet
   if (last && now - last < intervalMs) {
-    return;
+    return { ok: false, reason: "not_due", feedId: feed.id, source: feed.source };
   }
 
   const resp = await fetch(feed.url);
   if (!resp.ok) {
     console.log("RSS fetch failed", feed.id, feed.url, resp.status);
-    return;
+    return {
+      ok: false,
+      reason: "http_error",
+      status: resp.status,
+      feedId: feed.id,
+      source: feed.source,
+    };
   }
 
   const xml = await resp.text();
@@ -217,6 +188,19 @@ async function fetchFeedIfDue(env, feed) {
     expirationTtl: 60 * 60 * 12,
   });
   await env.SIMPLE_RSS_CACHE.put(lastKey, now.toString());
+
+  // Indicate this feed was actually pulled
+  console.log(
+    JSON.stringify({
+      type: "feed_pulled_ok",
+      ts: new Date().toISOString(),
+      feedId: feed.id,
+      source: feed.source,
+      url: feed.url,
+    })
+  );
+
+  return { ok: true, feedId: feed.id, source: feed.source };
 }
 
 async function aggregateAllFromKV(env) {
@@ -230,7 +214,6 @@ async function aggregateAllFromKV(env) {
     all = all.concat(items);
   }
 
-  // Sort by publishedAt desc
   all.sort((a, b) => {
     const ta = a.publishedAt ? Date.parse(a.publishedAt) : 0;
     const tb = b.publishedAt ? Date.parse(b.publishedAt) : 0;
@@ -246,21 +229,31 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Manual refresh: only fetch feeds that are due
     if (url.pathname === "/fetch-all") {
-      await Promise.all(FEEDS.map(feed => fetchFeedIfDue(env, feed)));
+      const results = await Promise.all(FEEDS.map(feed => fetchFeedIfDue(env, feed)));
+      const pulledFeeds = results
+        .filter(r => r && r.ok)
+        .map(r => ({ feedId: r.feedId, source: r.source }));
+
+      console.log(
+        JSON.stringify({
+          type: "manual_fetch_summary",
+          ts: new Date().toISOString(),
+          pulledFeeds,
+        })
+      );
+
       return new Response("Fetched due feeds");
     }
 
     if (url.pathname === "/test-nitter") {
-      const testUrl = "https://nitter.privacydev.net/ShamsCharania/rss"; // put the instance/account you want
+      const testUrl = "https://nitter.privacydev.net/ShamsCharania/rss";
       const result = await testNitterFeed(testUrl);
       return new Response(JSON.stringify(result), {
         headers: { "Content-Type": "application/json" },
       });
     }
     
-    // Aggregated JSON for your app
     if (url.pathname === "/api/news") {
       const articles = await aggregateAllFromKV(env);
       return new Response(JSON.stringify({ articles }), {
@@ -271,9 +264,20 @@ export default {
     return new Response("OK from rss-aggregator");
   },
 
-  // Optional: when you add a cron trigger in wrangler.toml / dashboard,
-  // point it at this scheduled handler, which reuses the same logic.
   async scheduled(event, env, ctx) {
-    await Promise.all(FEEDS.map(feed => fetchFeedIfDue(env, feed)));
+    const results = await Promise.all(FEEDS.map(feed => fetchFeedIfDue(env, feed)));
+
+    const pulledFeeds = results
+      .filter(r => r && r.ok)
+      .map(r => ({ feedId: r.feedId, source: r.source }));
+
+    console.log(
+      JSON.stringify({
+        type: "cron_summary",
+        ts: new Date().toISOString(),
+        run: "rss-aggregator",
+        pulledFeeds,  // list of { feedId, source } that actually fetched
+      })
+    );
   },
 };
