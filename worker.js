@@ -265,21 +265,53 @@ export default {
     if (url.pathname === "/test-feed") {
       const feedId = url.searchParams.get("feedId");
       const force = url.searchParams.get("force") === "true";
-      
+    
       if (!feedId) {
         return new Response("Missing feedId query param", { status: 400 });
       }
-
+    
       const feed = getFeedById(feedId);
       if (!feed) {
         return new Response(`Unknown feedId: ${feedId}`, { status: 404 });
       }
-
-      const result = await fetchFeedIfDue(env, feed, { force });
-
-      return new Response(JSON.stringify({ feedId, result }), {
-        headers: { "Content-Type": "application/json" },
-      });
+    
+      // Optionally force a fresh fetch
+      const fetchResult = await fetchFeedIfDue(env, feed, { force });
+    
+      // Always read the latest XML from KV
+      const xml = await env.SIMPLE_RSS_CACHE.get(`rss:${feed.id}`);
+      if (!xml) {
+        return new Response(
+          JSON.stringify({
+            feedId,
+            force,
+            fetchResult,
+            items: [],
+            note: "No XML found in KV for this feed yet",
+          }),
+          { headers: { "Content-Type": "application/json" }, status: 200 }
+        );
+      }
+    
+      const items = parseItems(xml, feed);
+    
+      return new Response(
+        JSON.stringify(
+          {
+            feedId,
+            force,
+            fetchResult,      // { ok: true/false, reason, ... }
+            count: items.length,
+            items,            // full parsed articles from just this source
+          },
+          null,
+          2
+        ),
+        {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }
+      );
     }
 
     if (url.pathname === "/test-nitter") {
