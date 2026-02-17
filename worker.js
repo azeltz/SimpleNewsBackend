@@ -22,13 +22,13 @@ const FEEDS = [
   // WSJ (longform / business / news)
   { id: "wsj_world",  url: "https://feeds.content.dowjones.io/public/rss/RSSWorldNews",               source: "wsj.com",            kind: "top" },
   { id: "wsj_us_business", url: "https://feeds.content.dowjones.io/public/rss/WSJcomUSBusiness",      source: "wsj.com",            kind: "important" },
-  { id: "wsj_markets",url: "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain",             source: "wsj.com",            kind: "consistnet" },
+  { id: "wsj_markets",url: "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain",             source: "wsj.com",            kind: "consistent" },
   { id: "wsj_tech",   url: "https://feeds.content.dowjones.io/public/rss/RSSWSJD",                    source: "wsj.com",            kind: "consistent" },
   { id: "wsj_politics", url: "https://feeds.content.dowjones.io/public/rss/socialpoliticsfeed",       source: "wsj.com",            kind: "consistent" },
   { id: "wsj_economy", url: "https://feeds.content.dowjones.io/public/rss/socialeconomyfeed",         source: "wsj.com",            kind: "consistent" },
   { id: "wsj_sports", url: "https://feeds.content.dowjones.io/public/rss/rsssportsfeed",              source: "wsj.com",            kind: "important" },
 
-  { id: "morning_brew", url: "https://www.morningbrew.com/feed.xml",              source: "morningbrew.com",            kind: "morning_daily" },
+  { id: "morning_brew", url: "https://www.morningbrew.com/feed.xml",     source: "morningbrew.com",      kind: "morning_daily" },
   
   // Israel / Euro sports sites
   { id: "one_main",   url: "https://www.one.co.il/rss/",                     source: "one.co.il",           kind: "top" },
@@ -41,6 +41,8 @@ function getFeedById(id) {
   return FEEDS.find(f => f.id === id) || null;
 }
 
+// ---- KIND-BASED SCHEDULES (interval OR fixed time) ----
+
 const INTERVALS = {
   // interval-based
   breaking:   { minutes: 1 },
@@ -51,17 +53,12 @@ const INTERVALS = {
   periodic:   { minutes: 60 },
   social:     { minutes: 10000000 },
 
-  // time-based kind
-  morning_daily: { timeUTC: "11:15" }, // runs once per day at 11:15 UTC
+  // time-based kind: once per day at 12:00 UTC
+  morning_daily: { timeUTC: "12:00" },
 };
 
-// One function that always returns a schedule object
 function getScheduleForFeed(feed) {
-  // start from kind-based config
-  const base = INTERVALS[feed.kind] || {};
-
-  // if you ever want per-feed overrides, you could merge them here
-  return base;
+  return INTERVALS[feed.kind] || {};
 }
 
 function isFeedDueByKind(feed, lastTimestamp, nowMs) {
@@ -69,6 +66,7 @@ function isFeedDueByKind(feed, lastTimestamp, nowMs) {
   const now = new Date(nowMs);
   const last = lastTimestamp || 0;
 
+  // Case 1: fixed daily time in UTC
   if (schedule.timeUTC) {
     const [hh, mm] = schedule.timeUTC.split(":").map(Number);
 
@@ -85,6 +83,7 @@ function isFeedDueByKind(feed, lastTimestamp, nowMs) {
     return nowMs >= todayRun && last < yesterdayRun;
   }
 
+  // Case 2: interval in minutes
   const minutes =
     typeof schedule.minutes === "number"
       ? schedule.minutes
@@ -96,7 +95,8 @@ function isFeedDueByKind(feed, lastTimestamp, nowMs) {
   return nowMs - last >= intervalMs;
 }
 
-// Test a single Nitter RSS URL from the Worker
+// ---- TEST NITTER ----
+
 async function testNitterFeed(url) {
   try {
     const resp = await fetch(url);
@@ -198,7 +198,7 @@ function parseItems(xml, feed) {
   return items;
 }
 
-// ---- FETCHING WITH PER-FEED INTERVALS ----
+// ---- FETCHING WITH KIND-BASED SCHEDULES ----
 
 async function fetchFeedIfDue(env, feed, options = {}) {
   const { force = false } = options;
@@ -256,40 +256,6 @@ async function fetchFeedIfDue(env, feed, options = {}) {
   return { ok: true, feedId: feed.id, source: feed.source };
 }
 
-  const resp = await fetch(feed.url);
-  if (!resp.ok) {
-    console.log("RSS fetch failed", feed.id, feed.url, resp.status);
-    return {
-      ok: false,
-      reason: "http_error",
-      status: resp.status,
-      feedId: feed.id,
-      source: feed.source,
-    };
-  }
-
-  const xml = await resp.text();
-  console.log("RSS fetched OK", feed.id, xml.slice(0, 200));
-
-  await env.SIMPLE_RSS_CACHE.put(`rss:${feed.id}`, xml, {
-    expirationTtl: 60 * 60 * 12,
-  });
-  await env.SIMPLE_RSS_CACHE.put(lastKey, now.toString());
-
-  // Indicate this feed was actually pulled
-  console.log(
-    JSON.stringify({
-      type: "feed_pulled_ok",
-      ts: new Date().toISOString(),
-      feedId: feed.id,
-      source: feed.source,
-      url: feed.url,
-    })
-  );
-
-  return { ok: true, feedId: feed.id, source: feed.source };
-}
-
 async function aggregateAllFromKV(env) {
   let all = [];
 
@@ -333,7 +299,6 @@ export default {
       return new Response("Fetched due feeds");
     }
 
-    // New: test a single feed by id, e.g. /test-feed?feedId=morning_brew
     if (url.pathname === "/test-feed") {
       const feedId = url.searchParams.get("feedId");
       const force = url.searchParams.get("force") === "true";
@@ -347,10 +312,8 @@ export default {
         return new Response(`Unknown feedId: ${feedId}`, { status: 404 });
       }
     
-      // Optionally force a fresh fetch
       const fetchResult = await fetchFeedIfDue(env, feed, { force });
     
-      // Always read the latest XML from KV
       const xml = await env.SIMPLE_RSS_CACHE.get(`rss:${feed.id}`);
       if (!xml) {
         return new Response(
@@ -372,9 +335,9 @@ export default {
           {
             feedId,
             force,
-            fetchResult,      // { ok: true/false, reason, ... }
+            fetchResult,
             count: items.length,
-            items,            // full parsed articles from just this source
+            items,
           },
           null,
           2
@@ -416,7 +379,7 @@ export default {
         type: "cron_summary",
         ts: new Date().toISOString(),
         run: "rss-aggregator",
-        pulledFeeds,  // list of { feedId, source } that actually fetched
+        pulledFeeds,
       })
     );
   },
