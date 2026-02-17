@@ -298,26 +298,38 @@ export default {
     const url = new URL(request.url);
 
     // 1) Sync feeds from app: POST /feeds
-    if (url.pathname === "/feeds" && request.method === "POST") {
-      const body = await request.json();
-      if (!Array.isArray(body.feeds)) {
-        return new Response("Expected { feeds: [...] }", { status: 400 });
+    if (url.pathname === "/feeds") {
+      if (request.method === "POST") {
+        const body = await request.json();
+        if (!Array.isArray(body.feeds)) {
+          return new Response("Expected { feeds: [...] }", { status: 400 });
+        }
+    
+        const cleaned = body.feeds.map(f => ({
+          id: String(f.id),
+          url: String(f.url),
+          source: String(f.source),
+          kind: String(f.kind),
+          schedule: f.schedule || undefined,
+        }));
+    
+        await env.SIMPLE_RSS_CACHE.put("feeds:config", JSON.stringify(cleaned));
+    
+        return new Response(
+          JSON.stringify({ ok: true, count: cleaned.length }),
+          { headers: { "Content-Type": "application/json" } }
+        );
       }
-
-      const cleaned = body.feeds.map(f => ({
-        id: String(f.id),
-        url: String(f.url),
-        source: String(f.source),
-        kind: String(f.kind),
-        schedule: f.schedule || undefined, // optional { minutes, timeUTC }
-      }));
-
-      await env.SIMPLE_RSS_CACHE.put("feeds:config", JSON.stringify(cleaned));
-
-      return new Response(
-        JSON.stringify({ ok: true, count: cleaned.length }),
-        { headers: { "Content-Type": "application/json" } }
-      );
+    
+      if (request.method === "GET") {
+        const feeds = await loadFeeds(env);
+        return new Response(JSON.stringify({ feeds }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      }
+    
+      return new Response("Method not allowed", { status: 405 });
     }
 
     // Manual refresh: only fetch feeds that are due
