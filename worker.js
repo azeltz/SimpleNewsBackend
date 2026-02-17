@@ -37,6 +37,10 @@ const FEEDS = [
   { id: "eurohoops",  url: "https://www.eurohoops.net/en/feed/",             source: "eurohoops.net",       kind: "consistent" },
 ];
 
+function getFeedById(id) {
+  return FEEDS.find(f => f.id === id) || null;
+}
+
 // Interval (in minutes) per feed kind
 const INTERVALS = {
   breaking: 1,
