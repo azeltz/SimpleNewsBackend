@@ -156,7 +156,9 @@ function parseItems(xml, feed) {
 
 // ---- FETCHING WITH PER-FEED INTERVALS ----
 
-async function fetchFeedIfDue(env, feed) {
+async function fetchFeedIfDue(env, feed, options = {}) {
+  const { force = false } = options;
+
   const now = Date.now();
   const lastKey = `last:${feed.id}`;
   const lastStr = await env.SIMPLE_RSS_CACHE.get(lastKey);
@@ -164,20 +166,19 @@ async function fetchFeedIfDue(env, feed) {
 
   const intervalMs = getIntervalMinutes(feed) * 60 * 1000;
 
-  // Not due yet
-  if (last && now - last < intervalMs) {
-  console.log(
-    JSON.stringify({
-      type: "feed_not_due",
-      ts: new Date().toISOString(),
-      feedId: feed.id,
-      source: feed.source,
-      last,
-      intervalMs,
-    })
-  );
-  return { ok: false, reason: "not_due", feedId: feed.id, source: feed.source };
-}
+  if (!force && last && now - last < intervalMs) {
+    console.log(
+      JSON.stringify({
+        type: "feed_not_due",
+        ts: new Date().toISOString(),
+        feedId: feed.id,
+        source: feed.source,
+        last,
+        intervalMs,
+      })
+    );
+    return { ok: false, reason: "not_due", feedId: feed.id, source: feed.source };
+  }
 
   const resp = await fetch(feed.url);
   if (!resp.ok) {
@@ -254,6 +255,27 @@ export default {
       );
 
       return new Response("Fetched due feeds");
+    }
+
+    // New: test a single feed by id, e.g. /test-feed?feedId=morning_brew
+    if (url.pathname === "/test-feed") {
+      const feedId = url.searchParams.get("feedId");
+      const force = url.searchParams.get("force") === "true";
+      
+      if (!feedId) {
+        return new Response("Missing feedId query param", { status: 400 });
+      }
+
+      const feed = getFeedById(feedId);
+      if (!feed) {
+        return new Response(`Unknown feedId: ${feedId}`, { status: 404 });
+      }
+
+      const result = await fetchFeedIfDue(env, feed, { force });
+
+      return new Response(JSON.stringify({ feedId, result }), {
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     if (url.pathname === "/test-nitter") {
