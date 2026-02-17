@@ -166,8 +166,18 @@ async function fetchFeedIfDue(env, feed) {
 
   // Not due yet
   if (last && now - last < intervalMs) {
-    return { ok: false, reason: "not_due", feedId: feed.id, source: feed.source };
-  }
+  console.log(
+    JSON.stringify({
+      type: "feed_not_due",
+      ts: new Date().toISOString(),
+      feedId: feed.id,
+      source: feed.source,
+      last,
+      intervalMs,
+    })
+  );
+  return { ok: false, reason: "not_due", feedId: feed.id, source: feed.source };
+}
 
   const resp = await fetch(feed.url);
   if (!resp.ok) {
