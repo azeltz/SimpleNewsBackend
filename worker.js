@@ -2,7 +2,8 @@
 
 const NITTER_BASE = "https://nitter.net";
 
-const FEEDS = [
+// Default feeds if KV has no config yet
+const DEFAULT_FEEDS = [
   // ESPN (top sports)
   { id: "espn_top",   url: "https://www.espn.com/espn/rss/news",         source: "espn.com",              kind: "top" },
   { id: "espn_nba",   url: "https://www.espn.com/espn/rss/nba/news",     source: "espn.com",              kind: "top" },
@@ -28,6 +29,7 @@ const FEEDS = [
   { id: "wsj_economy", url: "https://feeds.content.dowjones.io/public/rss/socialeconomyfeed",         source: "wsj.com",            kind: "consistent" },
   { id: "wsj_sports", url: "https://feeds.content.dowjones.io/public/rss/rsssportsfeed",              source: "wsj.com",            kind: "important" },
 
+  // Morning Brew: daily schedule kind
   { id: "morning_brew", url: "https://www.morningbrew.com/feed.xml",     source: "morningbrew.com",      kind: "morning_daily" },
   
   // Israel / Euro sports sites
@@ -37,14 +39,24 @@ const FEEDS = [
   { id: "eurohoops",  url: "https://www.eurohoops.net/en/feed/",             source: "eurohoops.net",       kind: "consistent" },
 ];
 
-function getFeedById(id) {
-  return FEEDS.find(f => f.id === id) || null;
+// Load feeds from KV; fall back to defaults
+async function loadFeeds(env) {
+  const stored = await env.SIMPLE_RSS_CACHE.get("feeds:config", { type: "json" });
+  if (!stored || !Array.isArray(stored)) {
+    return DEFAULT_FEEDS;
+  }
+  return stored;
+}
+
+async function getFeedByIdDynamic(env, id) {
+  const feeds = await loadFeeds(env);
+  return feeds.find(f => f.id === id) || null;
 }
 
 // ---- KIND-BASED SCHEDULES (interval OR fixed time) ----
 
 const INTERVALS = {
-  // interval-based
+  // interval-based kinds
   breaking:   { minutes: 1 },
   critical:   { minutes: 5 },
   top:        { minutes: 10 },
@@ -57,7 +69,9 @@ const INTERVALS = {
   morning_daily: { timeUTC: "12:30" },
 };
 
+// If feed has its own schedule (from KV), that overrides kind
 function getScheduleForFeed(feed) {
+  if (feed.schedule) return feed.schedule;
   return INTERVALS[feed.kind] || {};
 }
 
@@ -87,7 +101,7 @@ function isFeedDueByKind(feed, lastTimestamp, nowMs) {
   const minutes =
     typeof schedule.minutes === "number"
       ? schedule.minutes
-      : 10; // default if kind missing
+      : 10; // fallback
 
   const intervalMs = minutes * 60 * 1000;
   if (!last) return true;
@@ -148,7 +162,7 @@ function cleanCData(text) {
 }
 
 function extractTag(text, tag) {
-  const regex = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "i");
+  const regex = new RegExp(`<${tag}>([\s\S]*?)<\\/${tag}>`, "i");
   const match = text.match(regex);
   return match ? match[1].trim() : null;
 }
@@ -161,7 +175,7 @@ function extractFirstImageSrc(htmlLike) {
 
 function parseItems(xml, feed) {
   const items = [];
-  const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
+  const itemRegex = /<item>([\s\\S]*?)<\/item>/gi;
   let match;
 
   while ((match = itemRegex.exec(xml)) !== null) {
@@ -258,8 +272,9 @@ async function fetchFeedIfDue(env, feed, options = {}) {
 
 async function aggregateAllFromKV(env) {
   let all = [];
+  const feeds = await loadFeeds(env);
 
-  for (const feed of FEEDS) {
+  for (const feed of feeds) {
     const xml = await env.SIMPLE_RSS_CACHE.get(`rss:${feed.id}`);
     if (!xml) continue;
 
@@ -282,8 +297,33 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // 1) Sync feeds from app: POST /feeds
+    if (url.pathname === "/feeds" && request.method === "POST") {
+      const body = await request.json();
+      if (!Array.isArray(body.feeds)) {
+        return new Response("Expected { feeds: [...] }", { status: 400 });
+      }
+
+      const cleaned = body.feeds.map(f => ({
+        id: String(f.id),
+        url: String(f.url),
+        source: String(f.source),
+        kind: String(f.kind),
+        schedule: f.schedule || undefined, // optional { minutes, timeUTC }
+      }));
+
+      await env.SIMPLE_RSS_CACHE.put("feeds:config", JSON.stringify(cleaned));
+
+      return new Response(
+        JSON.stringify({ ok: true, count: cleaned.length }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Manual refresh: only fetch feeds that are due
     if (url.pathname === "/fetch-all") {
-      const results = await Promise.all(FEEDS.map(feed => fetchFeedIfDue(env, feed)));
+      const feeds = await loadFeeds(env);
+      const results = await Promise.all(feeds.map(feed => fetchFeedIfDue(env, feed)));
       const pulledFeeds = results
         .filter(r => r && r.ok)
         .map(r => ({ feedId: r.feedId, source: r.source }));
@@ -299,6 +339,7 @@ export default {
       return new Response("Fetched due feeds");
     }
 
+    // Test a single feed by id, e.g. /test-feed?feedId=morning_brew&force=true
     if (url.pathname === "/test-feed") {
       const feedId = url.searchParams.get("feedId");
       const force = url.searchParams.get("force") === "true";
@@ -307,7 +348,7 @@ export default {
         return new Response("Missing feedId query param", { status: 400 });
       }
     
-      const feed = getFeedById(feedId);
+      const feed = await getFeedByIdDynamic(env, feedId);
       if (!feed) {
         return new Response(`Unknown feedId: ${feedId}`, { status: 404 });
       }
@@ -368,7 +409,8 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    const results = await Promise.all(FEEDS.map(feed => fetchFeedIfDue(env, feed)));
+    const feeds = await loadFeeds(env);
+    const results = await Promise.all(feeds.map(feed => fetchFeedIfDue(env, feed)));
 
     const pulledFeeds = results
       .filter(r => r && r.ok)
