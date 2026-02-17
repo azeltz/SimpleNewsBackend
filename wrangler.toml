@@ -1,0 +1,7 @@
+name = "simplenews-backend"
+main = "worker.js"
+compatibility_date = "2026-02-16"
+
+[[kv_namespaces]]
+binding = "SIMPLE_RSS_CACHE"
+id = "41da26268ef44df58c5343027b9bb397"
