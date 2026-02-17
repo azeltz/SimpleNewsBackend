@@ -28,7 +28,7 @@ const FEEDS = [
   { id: "wsj_economy", url: "https://feeds.content.dowjones.io/public/rss/socialeconomyfeed",         source: "wsj.com",            kind: "consistent" },
   { id: "wsj_sports", url: "https://feeds.content.dowjones.io/public/rss/rsssportsfeed",              source: "wsj.com",            kind: "important" },
 
-  { id: "morning_brew", url: "https://www.morningbrew.com/feed.xml",              source: "morningbrew.com",            kind: "important" },
+  { id: "morning_brew", url: "https://www.morningbrew.com/feed.xml",              source: "morningbrew.com",            kind: "morning_daily" },
   
   // Israel / Euro sports sites
   { id: "one_main",   url: "https://www.one.co.il/rss/",                     source: "one.co.il",           kind: "top" },
@@ -41,19 +41,59 @@ function getFeedById(id) {
   return FEEDS.find(f => f.id === id) || null;
 }
 
-// Interval (in minutes) per feed kind
 const INTERVALS = {
-  breaking: 1,
-  critical: 5,
-  top: 10,
-  important: 20,
-  consistent: 30,
-  periodic: 60,
-  social: 10000000,
+  // interval-based
+  breaking:   { minutes: 1 },
+  critical:   { minutes: 5 },
+  top:        { minutes: 10 },
+  important:  { minutes: 20 },
+  consistent: { minutes: 30 },
+  periodic:   { minutes: 60 },
+  social:     { minutes: 10000000 },
+
+  // time-based kind
+  morning_daily: { timeUTC: "11:15" }, // runs once per day at 11:15 UTC
 };
 
-function getIntervalMinutes(feed) {
-  return INTERVALS[feed.kind] ?? INTERVALS.default;
+// One function that always returns a schedule object
+function getScheduleForFeed(feed) {
+  // start from kind-based config
+  const base = INTERVALS[feed.kind] || {};
+
+  // if you ever want per-feed overrides, you could merge them here
+  return base;
+}
+
+function isFeedDueByKind(feed, lastTimestamp, nowMs) {
+  const schedule = getScheduleForFeed(feed);
+  const now = new Date(nowMs);
+  const last = lastTimestamp || 0;
+
+  if (schedule.timeUTC) {
+    const [hh, mm] = schedule.timeUTC.split(":").map(Number);
+
+    const todayRun = Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      hh,
+      mm,
+      0
+    );
+    const yesterdayRun = todayRun - 24 * 60 * 60 * 1000;
+
+    return nowMs >= todayRun && last < yesterdayRun;
+  }
+
+  const minutes =
+    typeof schedule.minutes === "number"
+      ? schedule.minutes
+      : 10; // default if kind missing
+
+  const intervalMs = minutes * 60 * 1000;
+  if (!last) return true;
+
+  return nowMs - last >= intervalMs;
 }
 
 // Test a single Nitter RSS URL from the Worker
@@ -168,9 +208,7 @@ async function fetchFeedIfDue(env, feed, options = {}) {
   const lastStr = await env.SIMPLE_RSS_CACHE.get(lastKey);
   const last = lastStr ? parseInt(lastStr, 10) : 0;
 
-  const intervalMs = getIntervalMinutes(feed) * 60 * 1000;
-
-  if (!force && last && now - last < intervalMs) {
+  if (!force && !isFeedDueByKind(feed, last, now)) {
     console.log(
       JSON.stringify({
         type: "feed_not_due",
@@ -178,11 +216,45 @@ async function fetchFeedIfDue(env, feed, options = {}) {
         feedId: feed.id,
         source: feed.source,
         last,
-        intervalMs,
+        kind: feed.kind,
       })
     );
     return { ok: false, reason: "not_due", feedId: feed.id, source: feed.source };
   }
+
+  const resp = await fetch(feed.url);
+  if (!resp.ok) {
+    console.log("RSS fetch failed", feed.id, feed.url, resp.status);
+    return {
+      ok: false,
+      reason: "http_error",
+      status: resp.status,
+      feedId: feed.id,
+      source: feed.source,
+    };
+  }
+
+  const xml = await resp.text();
+  console.log("RSS fetched OK", feed.id, xml.slice(0, 200));
+
+  await env.SIMPLE_RSS_CACHE.put(`rss:${feed.id}`, xml, {
+    expirationTtl: 60 * 60 * 12,
+  });
+  await env.SIMPLE_RSS_CACHE.put(lastKey, now.toString());
+
+  console.log(
+    JSON.stringify({
+      type: "feed_pulled_ok",
+      ts: new Date().toISOString(),
+      feedId: feed.id,
+      source: feed.source,
+      url: feed.url,
+      kind: feed.kind,
+    })
+  );
+
+  return { ok: true, feedId: feed.id, source: feed.source };
+}
 
   const resp = await fetch(feed.url);
   if (!resp.ok) {
