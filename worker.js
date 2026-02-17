@@ -42,10 +42,16 @@ const DEFAULT_FEEDS = [
 // Load feeds from KV; fall back to defaults
 async function loadFeeds(env) {
   const stored = await env.SIMPLE_RSS_CACHE.get("feeds:config", { type: "json" });
-  if (!stored || !Array.isArray(stored)) {
+  if (!stored || !Array.isArray(stored) || stored.length === 0) {
     return DEFAULT_FEEDS;
   }
-  return stored;
+
+  // Merge defaults + stored, de-duping by id (stored wins)
+  const byId = new Map(DEFAULT_FEEDS.map(f => [f.id, f]));
+  for (const f of stored) {
+    byId.set(f.id, f);
+  }
+  return Array.from(byId.values());
 }
 
 async function getFeedByIdDynamic(env, id) {
@@ -162,7 +168,7 @@ function cleanCData(text) {
 }
 
 function extractTag(text, tag) {
-  const regex = new RegExp(`<${tag}>([\s\S]*?)<\\/${tag}>`, "i");
+  const regex = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "i");
   const match = text.match(regex);
   return match ? match[1].trim() : null;
 }
@@ -175,7 +181,7 @@ function extractFirstImageSrc(htmlLike) {
 
 function parseItems(xml, feed) {
   const items = [];
-  const itemRegex = /<item>([\s\\S]*?)<\/item>/gi;
+  const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
   let match;
 
   while ((match = itemRegex.exec(xml)) !== null) {
