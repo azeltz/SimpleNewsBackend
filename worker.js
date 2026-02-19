@@ -5,94 +5,61 @@ const NITTER_BASE = "https://nitter.net";
 // Default feeds if KV has no config yet
 const DEFAULT_FEEDS = [
   // ESPN (top sports)
-  { id: "espn_top",   url: "https://www.espn.com/espn/rss/news",         source: "espn.com",              kind: "top" },
-  { id: "espn_nba",   url: "https://www.espn.com/espn/rss/nba/news",     source: "espn.com",              kind: "top" },
-  { id: "espn_nfl",   url: "https://www.espn.com/espn/rss/nfl/news",     source: "espn.com",              kind: "top" },
-  { id: "espn_cfb",   url: "https://www.espn.com/espn/rss/ncf/news",     source: "espn.com",              kind: "important" },
-  { id: "espn_cbk",   url: "https://www.espn.com/espn/rss/ncb/news",     source: "espn.com",              kind: "consistent" },
-  { id: "espn_soccer",url: "https://www.espn.com/espn/rss/soccer/news",  source: "espn.com",              kind: "consistent" },
-  { id: "espn_tennis",url: "https://www.espn.com/espn/rss/tennis/news",  source: "espn.com",              kind: "periodic" },
+  { id: "espn_top",   url: "https://www.espn.com/espn/rss/news",         source: "espn.com",           kind: "top" },
+  { id: "espn_nba",   url: "https://www.espn.com/espn/rss/nba/news",     source: "espn.com",           kind: "top" },
+  { id: "espn_nfl",   url: "https://www.espn.com/espn/rss/nfl/news",     source: "espn.com",           kind: "top" },
+  { id: "espn_cfb",   url: "https://www.espn.com/espn/rss/ncf/news",     source: "espn.com",           kind: "important" },
+  { id: "espn_cbk",   url: "https://www.espn.com/espn/rss/ncb/news",     source: "espn.com",           kind: "consistent" },
+  { id: "espn_soccer",url: "https://www.espn.com/espn/rss/soccer/news",  source: "espn.com",           kind: "consistent" },
+  { id: "espn_tennis",url: "https://www.espn.com/espn/rss/tennis/news",  source: "espn.com",           kind: "periodic" },
 
   // CBS Sports (top sports)
-  { id: "cbs_top",    url: "https://www.cbssports.com/rss/headlines/",   source: "cbssports.com",         kind: "top" },
+  { id: "cbs_top",    url: "https://www.cbssports.com/rss/headlines/",   source: "cbssports.com",      kind: "top" },
 
   // NYT / The Athletic (longform / general)
-  { id: "nyt_home",   url: "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",               source: "nytimes.com",        kind: "top" },
-  { id: "nyt_pro_basketball", url: "https://rss.nytimes.com/services/xml/rss/nyt/ProBasketball.xml", source: "nytimes.com",        kind: "important" },
+  { id: "nyt_home",   url: "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",               source: "nytimes.com",   kind: "top" },
+  { id: "nyt_pro_basketball", url: "https://rss.nytimes.com/services/xml/rss/nyt/ProBasketball.xml", source: "nytimes.com",   kind: "important" },
 
   // AP / Associated Press (shorter / general)
-  { id: "ap_top", url: "http://hosted.ap.org/lineups/TOPHEADS.rss", source: "apnews.com", kind: "top" },
+  { id: "ap_top",     url: "http://hosted.ap.org/lineups/TOPHEADS.rss",  source: "apnews.com",         kind: "top" },
   
   // WSJ (longform / business / news)
-  { id: "wsj_world",  url: "https://feeds.content.dowjones.io/public/rss/RSSWorldNews",               source: "wsj.com",            kind: "top" },
-  { id: "wsj_us_business", url: "https://feeds.content.dowjones.io/public/rss/WSJcomUSBusiness",      source: "wsj.com",            kind: "important" },
-  { id: "wsj_markets",url: "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain",             source: "wsj.com",            kind: "consistent" },
-  { id: "wsj_tech",   url: "https://feeds.content.dowjones.io/public/rss/RSSWSJD",                    source: "wsj.com",            kind: "consistent" },
-  { id: "wsj_politics", url: "https://feeds.content.dowjones.io/public/rss/socialpoliticsfeed",       source: "wsj.com",            kind: "consistent" },
-  { id: "wsj_economy", url: "https://feeds.content.dowjones.io/public/rss/socialeconomyfeed",         source: "wsj.com",            kind: "consistent" },
-  { id: "wsj_sports", url: "https://feeds.content.dowjones.io/public/rss/rsssportsfeed",              source: "wsj.com",            kind: "important" },
+  { id: "wsj_world",  url: "https://feeds.content.dowjones.io/public/rss/RSSWorldNews",               source: "wsj.com",       kind: "top" },
+  { id: "wsj_us_business", url: "https://feeds.content.dowjones.io/public/rss/WSJcomUSBusiness",      source: "wsj.com",       kind: "important" },
+  { id: "wsj_markets",url: "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain",             source: "wsj.com",       kind: "consistent" },
+  { id: "wsj_tech",   url: "https://feeds.content.dowjones.io/public/rss/RSSWSJD",                    source: "wsj.com",       kind: "consistent" },
+  { id: "wsj_politics", url: "https://feeds.content.dowjones.io/public/rss/socialpoliticsfeed",       source: "wsj.com",       kind: "consistent" },
+  { id: "wsj_economy", url: "https://feeds.content.dowjones.io/public/rss/socialeconomyfeed",         source: "wsj.com",       kind: "consistent" },
+  { id: "wsj_sports", url: "https://feeds.content.dowjones.io/public/rss/rsssportsfeed",              source: "wsj.com",       kind: "important" },
 
   // Morning Brew: daily schedule kind
-  { id: "morning_brew", url: "https://www.morningbrew.com/feed.xml",     source: "morningbrew.com",      kind: "morning_daily" },
+  { id: "morning_brew", url: "https://www.morningbrew.com/feed.xml",     source: "morningbrew.com",    kind: "morning_daily" },
   
   // Israel / Euro sports sites
-  { id: "one_main",   url: "https://www.one.co.il/rss/",                     source: "one.co.il",           kind: "top" },
-  { id: "yahoo_sports", url: "https://sports.yahoo.com/general/news/rss/",   source: "sports.yahoo.com",    kind: "top" },
+  { id: "one_main",   url: "https://www.one.co.il/rss/",                     source: "one.co.il",        kind: "top" },
+  { id: "yahoo_sports", url: "https://sports.yahoo.com/general/news/rss/",   source: "sports.yahoo.com", kind: "top" },
   { id: "front_office_sports", url: "https://frontofficesports.com/feed/",   source: "frontofficesports.com", kind: "periodic" },
-  { id: "eurohoops",  url: "https://www.eurohoops.net/en/feed/",             source: "eurohoops.net",       kind: "consistent" },
+  { id: "eurohoops",  url: "https://www.eurohoops.net/en/feed/",             source: "eurohoops.net",    kind: "consistent" },
 
-  // ----- YOUR 4 NEW FEEDS -----
+  // Israeli general news
+  { id: "ynet_english_news", url: "https://www.ynet.co.il/3rdparty/mobile/rss/ynetnews/3082/", source: "ynet.co.il", kind: "important" },
+  { id: "ynet_top",          url: "https://www.ynet.co.il/Integration/StoryRss2.xml",          source: "ynet.co.il", kind: "top" },
+  { id: "ynet_consistent",   url: "https://www.ynet.co.il/Integration/StoryRss3.xml",          source: "ynet.co.il", kind: "consistent" },
 
-{
-  id: "ynet_english_news", url: "https://www.ynet.co.il/3rdparty/mobile/rss/ynetnews/3082/", source: "ynet.co.il",
-  kind: "important",
-},
+  // Local Texas cities (Google News blend)
+  { id: "local_tx_cities", url: "https://news.google.com/rss/search?q=%22Dallas+Texas%22+OR+%22Plano+Texas%22+OR+%22College+Station+Texas%22+OR+%22Bryan+Texas%22&hl=en-US&gl=US&ceid=US:en", source: "news.google.com", kind: "consistent" },
 
-{
-  id: "ynet_top",
-  url: "https://www.ynet.co.il/Integration/StoryRss2.xml",
-  source: "ynet.co.il",
-  kind: "top",
-},
+  // Sports analytics
+  { id: "opta_analyst", url: "https://theanalyst.com/feed/",                source: "theanalyst.com",   kind: "periodic" },
 
-{
-  id: "ynet_consistent",
-  url: "https://www.ynet.co.il/Integration/StoryRss3.xml",
-  source: "ynet.co.il",
-  kind: "consistent",
-},
+  // Tech / startups
+  { id: "techcrunch_main", url: "https://techcrunch.com/feed/",             source: "techcrunch.com",   kind: "consistent" },
 
-{
-  id: "local_tx_cities",
-  url: "https://news.google.com/rss/search?q=%22Dallas+Texas%22+OR+%22Plano+Texas%22+OR+%22College+Station+Texas%22+OR+%22Bryan+Texas%22&hl=en-US&gl=US&ceid=US:en",
-  source: "news.google.com",
-  kind: "consistent",
-},
-
-// ----- MY TOP 3 SUGGESTED FEEDS -----
-
-{
-  id: "opta_analyst",
-  url: "https://theanalyst.com/feed/",
-  source: "theanalyst.com",
-  kind: "periodic",
-},
-
-{
-  id: "techcrunch_main",
-  url: "https://techcrunch.com/feed/",
-  source: "techcrunch.com",
-  kind: "consistent",
-},
-
-{
-  id: "stlouis_fed_economy",
-  url: "https://www.stlouisfed.org/on-the-economy/rss",
-  source: "stlouisfed.org",
-  kind: "periodic",
-},
-
+    // Texas A&M / SEC news (Google News blends)
+  { id: "tamu_news", url: "https://news.google.com/rss/search?q=%22Texas+A%26M%22+OR+%22Aggies%22&hl=en-US&gl=US&ceid=US:en", source: "news.google.com", kind: "consistent" },
+  { id: "sec_news",  url: "https://news.google.com/rss/search?q=%22SEC%22+OR+%22Southeastern+Conference%22+college+football+OR+college+basketball&hl=en-US&gl=US&ceid=US:en", source: "news.google.com", kind: "consistent" },
 ];
+
 
 // Load feeds from KV; fall back to defaults
 async function loadFeeds(env) {
