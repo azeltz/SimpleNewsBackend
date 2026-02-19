@@ -55,11 +55,10 @@ const DEFAULT_FEEDS = [
   // Tech / startups
   { id: "techcrunch_main", url: "https://techcrunch.com/feed/",             source: "techcrunch.com",   kind: "consistent" },
 
-    // Texas A&M / SEC news (Google News blends)
+  // Texas A&M / SEC news (Google News blends)
   { id: "tamu_news", url: "https://news.google.com/rss/search?q=%22Texas+A%26M%22+OR+%22Aggies%22&hl=en-US&gl=US&ceid=US:en", source: "news.google.com", kind: "consistent" },
   { id: "sec_news",  url: "https://news.google.com/rss/search?q=%22SEC%22+OR+%22Southeastern+Conference%22+college+football+OR+college+basketball&hl=en-US&gl=US&ceid=US:en", source: "news.google.com", kind: "consistent" },
 ];
-
 
 // Load feeds from KV; fall back to defaults
 async function loadFeeds(env) {
@@ -68,7 +67,6 @@ async function loadFeeds(env) {
     return DEFAULT_FEEDS;
   }
 
-  // Merge defaults + stored, de-duping by id (stored wins)
   const byId = new Map(DEFAULT_FEEDS.map(f => [f.id, f]));
   for (const f of stored) {
     byId.set(f.id, f);
@@ -84,7 +82,6 @@ async function getFeedByIdDynamic(env, id) {
 // ---- KIND-BASED SCHEDULES (interval OR fixed time) ----
 
 const INTERVALS = {
-  // interval-based kinds
   breaking:   { minutes: 1 },
   critical:   { minutes: 5 },
   top:        { minutes: 10 },
@@ -97,7 +94,6 @@ const INTERVALS = {
   morning_daily: { timeUTC: "12:30" },
 };
 
-// If feed has its own schedule (from KV), that overrides kind
 function getScheduleForFeed(feed) {
   if (feed.schedule) return feed.schedule;
   return INTERVALS[feed.kind] || {};
@@ -108,7 +104,6 @@ function isFeedDueByKind(feed, lastTimestamp, nowMs) {
   const now = new Date(nowMs);
   const last = lastTimestamp || 0;
 
-  // Case 1: fixed daily time in UTC
   if (schedule.timeUTC) {
     const [hh, mm] = schedule.timeUTC.split(":").map(Number);
 
@@ -125,11 +120,10 @@ function isFeedDueByKind(feed, lastTimestamp, nowMs) {
     return nowMs >= todayRun && last < yesterdayRun;
   }
 
-  // Case 2: interval in minutes
   const minutes =
     typeof schedule.minutes === "number"
       ? schedule.minutes
-      : 10; // fallback
+      : 10;
 
   const intervalMs = minutes * 60 * 1000;
   if (!last) return true;
@@ -238,6 +232,43 @@ function parseItems(xml, feed) {
   }
 
   return items;
+}
+
+// ---- GOOGLE NEWS KEYWORD SUPPORT ----
+
+function buildGoogleNewsUrlFromKeywords(keywords) {
+  if (!keywords || keywords.length === 0) return null;
+
+  const query = keywords
+    .map(k => `"${k}"`)
+    .join(" OR ");
+
+  const encoded = encodeURIComponent(query);
+
+  return `https://news.google.com/rss/search?q=${encoded}&hl=en-US&gl=US&ceid=US:en`;
+}
+
+async function loadDynamicKeywordFeed(env) {
+  const stored = await env.SIMPLE_RSS_CACHE.get("preferences:keywords");
+  if (!stored) return null;
+
+  let keywords;
+  try {
+    keywords = JSON.parse(stored);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(keywords) || keywords.length === 0) return null;
+
+  const url = buildGoogleNewsUrlFromKeywords(keywords);
+  if (!url) return null;
+
+  return {
+    id: "dynamic_keywords",
+    url,
+    source: "news.google.com",
+    kind: "consistent",
+  };
 }
 
 // ---- SAFE KV PUT ----
@@ -400,15 +431,42 @@ export default {
       return new Response("Method not allowed", { status: 405 });
     }
 
+    // 2) Store dynamic keywords: POST /keywords
+    if (url.pathname === "/keywords" && request.method === "POST") {
+      const body = await request.json();
+      const keywords = Array.isArray(body.keywords) ? body.keywords : [];
+
+      const putResult = await safePut(
+        env,
+        "preferences:keywords",
+        JSON.stringify(keywords)
+      );
+      if (!putResult.ok) {
+        return new Response(
+          JSON.stringify({ ok: false, error: putResult.error }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({ ok: true, count: keywords.length }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+
     // Manual refresh: only fetch feeds that are due
     if (url.pathname === "/fetch-all") {
-      const feeds = await loadFeeds(env);
+      let feeds = await loadFeeds(env);
+      const dynamicFeed = await loadDynamicKeywordFeed(env);
+      if (dynamicFeed) {
+        feeds = [...feeds, dynamicFeed];
+      }
+
       const results = await Promise.all(feeds.map(feed => fetchFeedIfDue(env, feed)));
       const pulledFeeds = results
         .filter(r => r && r.ok)
         .map(r => ({ feedId: r.feedId, source: r.source }));
 
-      // Only update meta if at least one feed was successfully pulled
       if (pulledFeeds.length > 0) {
         await safePut(
           env,
@@ -487,6 +545,7 @@ export default {
       });
     }
     
+    // /api/news: aggregate from KV
     if (url.pathname === "/api/news") {
       const articles = await aggregateAllFromKV(env);
       const lastSnapshotAt = await env.SIMPLE_RSS_CACHE.get("meta:last_snapshot_at");
@@ -495,11 +554,45 @@ export default {
       });
     }
 
+    // /api/search-news: ad-hoc Google News search (no KV writes)
+    if (url.pathname === "/api/search-news" && request.method === "POST") {
+      const body = await request.json();
+      const keywords = Array.isArray(body.keywords) ? body.keywords : [];
+
+      if (keywords.length === 0) {
+        return new Response(JSON.stringify({ articles: [] }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      const gnewsUrl = buildGoogleNewsUrlFromKeywords(keywords);
+      const resp = await fetch(gnewsUrl);
+      if (!resp.ok) {
+        return new Response(
+          JSON.stringify({ articles: [], error: `Google News HTTP ${resp.status}` }),
+          { headers: { "Content-Type": "application/json" }, status: 200 }
+        );
+      }
+      const xml = await resp.text();
+
+      const tempFeed = { id: "search_dynamic", source: "news.google.com" };
+      const items = parseItems(xml, tempFeed);
+
+      return new Response(JSON.stringify({ articles: items }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     return new Response("OK from rss-aggregator");
   },
 
   async scheduled(event, env, ctx) {
-    const feeds = await loadFeeds(env);
+    let feeds = await loadFeeds(env);
+    const dynamicFeed = await loadDynamicKeywordFeed(env);
+    if (dynamicFeed) {
+      feeds = [...feeds, dynamicFeed];
+    }
+
     const results = await Promise.all(feeds.map(feed => fetchFeedIfDue(env, feed)));
 
     const pulledFeeds = results
