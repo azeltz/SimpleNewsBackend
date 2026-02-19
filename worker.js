@@ -218,6 +218,25 @@ function parseItems(xml, feed) {
   return items;
 }
 
+// ---- SAFE KV PUT ----
+
+async function safePut(env, key, value, options) {
+  try {
+    await env.SIMPLE_RSS_CACHE.put(key, value, options);
+    return { ok: true };
+  } catch (err) {
+    console.log(
+      JSON.stringify({
+        type: "kv_put_error",
+        key,
+        error: String(err),
+        ts: new Date().toISOString(),
+      })
+    );
+    return { ok: false, error: String(err) };
+  }
+}
+
 // ---- FETCHING WITH KIND-BASED SCHEDULES ----
 
 async function fetchFeedIfDue(env, feed, options = {}) {
@@ -257,10 +276,21 @@ async function fetchFeedIfDue(env, feed, options = {}) {
   const xml = await resp.text();
   console.log("RSS fetched OK", feed.id, xml.slice(0, 200));
 
-  await env.SIMPLE_RSS_CACHE.put(`rss:${feed.id}`, xml, {
+  const write1 = await safePut(env, `rss:${feed.id}`, xml, {
     expirationTtl: 60 * 60 * 12,
   });
-  await env.SIMPLE_RSS_CACHE.put(lastKey, now.toString());
+  const write2 = await safePut(env, lastKey, now.toString());
+
+  if (!write1.ok || !write2.ok) {
+    return {
+      ok: false,
+      reason: "kv_write_failed",
+      feedId: feed.id,
+      source: feed.source,
+      write1,
+      write2,
+    };
+  }
 
   console.log(
     JSON.stringify({
@@ -319,7 +349,17 @@ export default {
           schedule: f.schedule || undefined,
         }));
     
-        await env.SIMPLE_RSS_CACHE.put("feeds:config", JSON.stringify(cleaned));
+        const putResult = await safePut(
+          env,
+          "feeds:config",
+          JSON.stringify(cleaned)
+        );
+        if (!putResult.ok) {
+          return new Response(
+            JSON.stringify({ ok: false, error: putResult.error }),
+            { status: 500, headers: { "Content-Type": "application/json" } }
+          );
+        }
     
         return new Response(
           JSON.stringify({ ok: true, count: cleaned.length }),
@@ -345,6 +385,15 @@ export default {
       const pulledFeeds = results
         .filter(r => r && r.ok)
         .map(r => ({ feedId: r.feedId, source: r.source }));
+
+      // Only update meta if at least one feed was successfully pulled
+      if (pulledFeeds.length > 0) {
+        await safePut(
+          env,
+          "meta:last_snapshot_at",
+          new Date().toISOString()
+        );
+      }
 
       console.log(
         JSON.stringify({
@@ -418,7 +467,8 @@ export default {
     
     if (url.pathname === "/api/news") {
       const articles = await aggregateAllFromKV(env);
-      return new Response(JSON.stringify({ articles }), {
+      const lastSnapshotAt = await env.SIMPLE_RSS_CACHE.get("meta:last_snapshot_at");
+      return new Response(JSON.stringify({ articles, lastSnapshotAt }), {
         headers: { "Content-Type": "application/json" },
       });
     }
@@ -433,6 +483,14 @@ export default {
     const pulledFeeds = results
       .filter(r => r && r.ok)
       .map(r => ({ feedId: r.feedId, source: r.source }));
+
+    if (pulledFeeds.length > 0) {
+      await safePut(
+        env,
+        "meta:last_snapshot_at",
+        new Date().toISOString()
+      );
+    }
 
     console.log(
       JSON.stringify({
