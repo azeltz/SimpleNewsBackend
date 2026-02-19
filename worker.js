@@ -20,6 +20,9 @@ const DEFAULT_FEEDS = [
   { id: "nyt_home",   url: "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",               source: "nytimes.com",        kind: "top" },
   { id: "nyt_pro_basketball", url: "https://rss.nytimes.com/services/xml/rss/nyt/ProBasketball.xml", source: "nytimes.com",        kind: "important" },
 
+  // AP / Associated Press (shorter / general)
+  { id: "ap_top", url: "http://hosted.ap.org/lineups/TOPHEADS.rss", source: "apnews.com", kind: "top" },
+  
   // WSJ (longform / business / news)
   { id: "wsj_world",  url: "https://feeds.content.dowjones.io/public/rss/RSSWorldNews",               source: "wsj.com",            kind: "top" },
   { id: "wsj_us_business", url: "https://feeds.content.dowjones.io/public/rss/WSJcomUSBusiness",      source: "wsj.com",            kind: "important" },
@@ -37,6 +40,58 @@ const DEFAULT_FEEDS = [
   { id: "yahoo_sports", url: "https://sports.yahoo.com/general/news/rss/",   source: "sports.yahoo.com",    kind: "top" },
   { id: "front_office_sports", url: "https://frontofficesports.com/feed/",   source: "frontofficesports.com", kind: "periodic" },
   { id: "eurohoops",  url: "https://www.eurohoops.net/en/feed/",             source: "eurohoops.net",       kind: "consistent" },
+
+  // ----- YOUR 4 NEW FEEDS -----
+
+{
+  id: "ynet_english_news", url: "https://www.ynet.co.il/3rdparty/mobile/rss/ynetnews/3082/", source: "ynet.co.il",
+  kind: "important",
+},
+
+{
+  id: "ynet_top",
+  url: "https://www.ynet.co.il/Integration/StoryRss2.xml",
+  source: "ynet.co.il",
+  kind: "top",
+},
+
+{
+  id: "ynet_consistent",
+  url: "https://www.ynet.co.il/Integration/StoryRss3.xml",
+  source: "ynet.co.il",
+  kind: "consistent",
+},
+
+{
+  id: "local_tx_cities",
+  url: "https://news.google.com/rss/search?q=%22Dallas+Texas%22+OR+%22Plano+Texas%22+OR+%22College+Station+Texas%22+OR+%22Bryan+Texas%22&hl=en-US&gl=US&ceid=US:en",
+  source: "news.google.com",
+  kind: "consistent",
+},
+
+// ----- MY TOP 3 SUGGESTED FEEDS -----
+
+{
+  id: "opta_analyst",
+  url: "https://theanalyst.com/feed/",
+  source: "theanalyst.com",
+  kind: "periodic",
+},
+
+{
+  id: "techcrunch_main",
+  url: "https://techcrunch.com/feed/",
+  source: "techcrunch.com",
+  kind: "consistent",
+},
+
+{
+  id: "stlouis_fed_economy",
+  url: "https://www.stlouisfed.org/on-the-economy/rss",
+  source: "stlouisfed.org",
+  kind: "periodic",
+},
+
 ];
 
 // Load feeds from KV; fall back to defaults
