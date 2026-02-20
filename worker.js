@@ -329,12 +329,36 @@ async function fetchFeedIfDue(env, feed, options = {}) {
   const xml = await resp.text();
   console.log("RSS fetched OK", feed.id, xml.slice(0, 200));
 
+  // NEW: parse items and compare first item id to lastSeen
+  const items = parseItems(xml, feed);
+  const newestId = items.length > 0 ? items[0].id : null;
+  const lastSeenKey = `lastSeen:${feed.id}`;
+  const lastSeen = await env.SIMPLE_RSS_CACHE.get(lastSeenKey);
+
+  if (newestId && lastSeen && lastSeen === newestId && !force) {
+    // No new articles; skip KV writes entirely
+    console.log(
+      JSON.stringify({
+        type: "feed_no_change",
+        ts: new Date().toISOString(),
+        feedId: feed.id,
+        source: feed.source,
+        newestId,
+      })
+    );
+    return { ok: false, reason: "no_change", feedId: feed.id, source: feed.source };
+  }
+
+  // Only if changed do we write XML + timestamps + lastSeen
   const write1 = await safePut(env, `rss:${feed.id}`, xml, {
     expirationTtl: 60 * 60 * 12,
   });
   const write2 = await safePut(env, lastKey, now.toString());
+  const write3 = newestId
+    ? await safePut(env, lastSeenKey, newestId)
+    : { ok: true };
 
-  if (!write1.ok || !write2.ok) {
+  if (!write1.ok || !write2.ok || !write3.ok) {
     return {
       ok: false,
       reason: "kv_write_failed",
@@ -342,6 +366,7 @@ async function fetchFeedIfDue(env, feed, options = {}) {
       source: feed.source,
       write1,
       write2,
+      write3,
     };
   }
 
@@ -353,6 +378,7 @@ async function fetchFeedIfDue(env, feed, options = {}) {
       source: feed.source,
       url: feed.url,
       kind: feed.kind,
+      newestId,
     })
   );
 
