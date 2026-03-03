@@ -60,9 +60,14 @@ const DEFAULT_FEEDS = [
   { id: "sec_news",  url: "https://news.google.com/rss/search?q=%22SEC%22+OR+%22Southeastern+Conference%22+college+football+OR+college+basketball&hl=en-US&gl=US&ceid=US:en", source: "news.google.com", kind: "consistent" },
 ];
 
+// New: helper to create per-user config key
+function feedsConfigKey(userId) {
+  return userId ? `feeds:config:${userId}` : "feeds:config";
+}
+
 // Load feeds from KV; fall back to defaults
-async function loadFeeds(env) {
-  const stored = await env.SIMPLE_RSS_CACHE.get("feeds:config", { type: "json" });
+async function loadFeeds(env, userId = null) {
+  const stored = await env.SIMPLE_RSS_CACHE.get(feedsConfigKey(userId), { type: "json" });
   if (!stored || !Array.isArray(stored) || stored.length === 0) {
     return DEFAULT_FEEDS;
   }
@@ -74,8 +79,8 @@ async function loadFeeds(env) {
   return Array.from(byId.values());
 }
 
-async function getFeedByIdDynamic(env, id) {
-  const feeds = await loadFeeds(env);
+async function getFeedByIdDynamic(env, id, userId = null) {
+  const feeds = await loadFeeds(env, userId);
   return feeds.find(f => f.id === id) || null;
 }
 
@@ -329,14 +334,12 @@ async function fetchFeedIfDue(env, feed, options = {}) {
   const xml = await resp.text();
   console.log("RSS fetched OK", feed.id, xml.slice(0, 200));
 
-  // NEW: parse items and compare first item id to lastSeen
   const items = parseItems(xml, feed);
   const newestId = items.length > 0 ? items[0].id : null;
   const lastSeenKey = `lastSeen:${feed.id}`;
   const lastSeen = await env.SIMPLE_RSS_CACHE.get(lastSeenKey);
 
   if (newestId && lastSeen && lastSeen === newestId && !force) {
-    // No new articles; skip KV writes entirely
     console.log(
       JSON.stringify({
         type: "feed_no_change",
@@ -349,7 +352,6 @@ async function fetchFeedIfDue(env, feed, options = {}) {
     return { ok: false, reason: "no_change", feedId: feed.id, source: feed.source };
   }
 
-  // Only if changed do we write XML + timestamps + lastSeen
   const write1 = await safePut(env, `rss:${feed.id}`, xml, {
     expirationTtl: 60 * 60 * 12,
   });
@@ -385,9 +387,9 @@ async function fetchFeedIfDue(env, feed, options = {}) {
   return { ok: true, feedId: feed.id, source: feed.source };
 }
 
-async function aggregateAllFromKV(env) {
+async function aggregateAllFromKV(env, userId = null) {
   let all = [];
-  const feeds = await loadFeeds(env);
+  const feeds = await loadFeeds(env, userId);
 
   for (const feed of feeds) {
     const xml = await env.SIMPLE_RSS_CACHE.get(`rss:${feed.id}`);
@@ -412,6 +414,12 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // Identify user (optional)
+    const userId =
+      url.searchParams.get("userId") ||
+      request.headers.get("X-SimpleNews-UserId") ||
+      null;
+
     // 1) Sync feeds from app: POST /feeds
     if (url.pathname === "/feeds") {
       if (request.method === "POST") {
@@ -430,7 +438,7 @@ export default {
     
         const putResult = await safePut(
           env,
-          "feeds:config",
+          feedsConfigKey(userId),
           JSON.stringify(cleaned)
         );
         if (!putResult.ok) {
@@ -447,7 +455,7 @@ export default {
       }
     
       if (request.method === "GET") {
-        const feeds = await loadFeeds(env);
+        const feeds = await loadFeeds(env, userId);
         return new Response(JSON.stringify({ feeds }), {
           headers: { "Content-Type": "application/json" },
           status: 200,
@@ -457,7 +465,7 @@ export default {
       return new Response("Method not allowed", { status: 405 });
     }
 
-    // 2) Store dynamic keywords: POST /keywords
+    // 2) Store dynamic keywords: POST /keywords (global for now)
     if (url.pathname === "/keywords" && request.method === "POST") {
       const body = await request.json();
       const keywords = Array.isArray(body.keywords) ? body.keywords : [];
@@ -480,9 +488,9 @@ export default {
       );
     }
 
-    // Manual refresh: only fetch feeds that are due
+    // Manual refresh: only fetch feeds that are due (global)
     if (url.pathname === "/fetch-all") {
-      let feeds = await loadFeeds(env);
+      let feeds = await loadFeeds(env, null);
       const dynamicFeed = await loadDynamicKeywordFeed(env);
       if (dynamicFeed) {
         feeds = [...feeds, dynamicFeed];
@@ -521,7 +529,7 @@ export default {
         return new Response("Missing feedId query param", { status: 400 });
       }
     
-      const feed = await getFeedByIdDynamic(env, feedId);
+      const feed = await getFeedByIdDynamic(env, feedId, userId);
       if (!feed) {
         return new Response(`Unknown feedId: ${feedId}`, { status: 404 });
       }
@@ -571,9 +579,9 @@ export default {
       });
     }
     
-    // /api/news: aggregate from KV
+    // /api/news: aggregate from KV for this user's feeds
     if (url.pathname === "/api/news") {
-      const articles = await aggregateAllFromKV(env);
+      const articles = await aggregateAllFromKV(env, userId);
       const lastSnapshotAt = await env.SIMPLE_RSS_CACHE.get("meta:last_snapshot_at");
       return new Response(JSON.stringify({ articles, lastSnapshotAt }), {
         headers: { "Content-Type": "application/json" },
@@ -613,7 +621,7 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    let feeds = await loadFeeds(env);
+    let feeds = await loadFeeds(env, null);
     const dynamicFeed = await loadDynamicKeywordFeed(env);
     if (dynamicFeed) {
       feeds = [...feeds, dynamicFeed];
