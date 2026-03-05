@@ -214,7 +214,7 @@ function extractFirstImageSrc(htmlLike) {
 
 function parseItems(xml, feed) {
   const items = [];
-  const itemRegex = /<item>([\s\\S]*?)<\\/item>/gi;
+  const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
   let match;
 
   while ((match = itemRegex.exec(xml)) !== null) {
