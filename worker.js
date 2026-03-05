@@ -10,6 +10,9 @@ const ARTICLE_TTL_MS = ARTICLE_TTL_DAYS * 24 * 60 * 60 * 1000;
 const ARTICLE_DELETE_DAYS = 15;
 const ARTICLE_DELETE_MS = ARTICLE_DELETE_DAYS * 24 * 60 * 60 * 1000;
 
+// Cleanup batch size (free plan safe)
+const CLEANUP_BATCH_SIZE = 10;
+
 function articleKey(id) {
   return `article:${id}`;
 }
@@ -17,6 +20,10 @@ function articleKey(id) {
 function articleMetaKey(feedId) {
   // stores JSON { ids: [articleId, ...] } for that feed
   return `article_meta:${feedId}`;
+}
+
+function articleCleanupStateKey(feedId) {
+  return `article_cleanup_state:${feedId}`;
 }
 
 // Default feeds if KV has no config yet
@@ -531,7 +538,7 @@ async function aggregateArticlesFromKV(env, userId = null) {
   return all;
 }
 
-// Cleanup: delete per-article keys older than 15 days
+// Cleanup: delete per-article keys older than 15 days, in small batches
 async function cleanOldArticles(env, feeds) {
   const now = Date.now();
   const cutoff = now - ARTICLE_DELETE_MS;
@@ -549,9 +556,22 @@ async function cleanOldArticles(env, feeds) {
       continue;
     }
 
-    const keepIds = [];
+    if (ids.length === 0) continue;
 
-    for (const id of ids) {
+    const stateKey = articleCleanupStateKey(feed.id);
+    const stateStr = await env.SIMPLE_RSS_CACHE.get(stateKey);
+    let startIndex = 0;
+    if (stateStr) {
+      const parsed = parseInt(stateStr, 10);
+      if (!Number.isNaN(parsed)) startIndex = parsed;
+    }
+
+    if (startIndex >= ids.length) startIndex = 0;
+
+    const endIndex = Math.min(startIndex + CLEANUP_BATCH_SIZE, ids.length);
+
+    for (let i = startIndex; i < endIndex; i++) {
+      const id = ids[i];
       const key = articleKey(id);
       const json = await env.SIMPLE_RSS_CACHE.get(key);
       if (!json) continue;
@@ -569,12 +589,11 @@ async function cleanOldArticles(env, feeds) {
 
       if (ts < cutoff) {
         await safeDelete(env, key);
-      } else {
-        keepIds.push(id);
       }
     }
 
-    await safePut(env, metaKey, JSON.stringify({ ids: keepIds }), {
+    const nextIndex = endIndex >= ids.length ? 0 : endIndex;
+    await safePut(env, stateKey, String(nextIndex), {
       expirationTtl: ARTICLE_TTL_DAYS * 24 * 60 * 60,
     });
   }
@@ -813,8 +832,16 @@ export default {
       );
     }
 
-    // run cleanup in the background (schedule this cron around 00:00 local)
-    ctx.waitUntil(cleanOldArticles(env, feeds));
+    // cleanup only every 4 runs (~once per hour with */15 cron)
+    const counterKey = "meta:cleanup_counter";
+    const counterStr = await env.SIMPLE_RSS_CACHE.get(counterKey);
+    const counter = counterStr ? parseInt(counterStr, 10) || 0 : 0;
+    const nextCounter = (counter + 1) % 4;
+    await safePut(env, counterKey, String(nextCounter));
+
+    if (nextCounter === 0) {
+      ctx.waitUntil(cleanOldArticles(env, feeds));
+    }
 
     console.log(
       JSON.stringify({
