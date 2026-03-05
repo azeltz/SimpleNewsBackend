@@ -226,7 +226,7 @@ function extractFirstImageSrc(htmlLike) {
 
 function parseItems(xml, feed) {
   const items = [];
-  const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
+  const itemRegex = /<item>([\s\\S]*?)<\\/item>/gi;
   let match;
 
   while ((match = itemRegex.exec(xml)) !== null) {
@@ -538,10 +538,12 @@ async function aggregateArticlesFromKV(env, userId = null) {
   return all;
 }
 
-// Cleanup: delete per-article keys older than 15 days, in small batches
+// Cleanup: delete per-article keys older than 15 days, in small batches,
+// only bothering with articles at least 14 days old
 async function cleanOldArticles(env, feeds) {
   const now = Date.now();
-  const cutoff = now - ARTICLE_DELETE_MS;
+  const deleteCutoff = now - ARTICLE_DELETE_MS; // 15 days
+  const checkCutoff = now - ARTICLE_TTL_MS;     // 14 days
 
   for (const feed of feeds) {
     const metaKey = articleMetaKey(feed.id);
@@ -587,7 +589,12 @@ async function cleanOldArticles(env, feeds) {
         article.publishedTs ||
         (article.publishedAt ? Date.parse(article.publishedAt) : 0);
 
-      if (ts < cutoff) {
+      // Only bother with near-expiry items (older than 14 days)
+      if (ts >= checkCutoff) {
+        continue;
+      }
+
+      if (ts < deleteCutoff) {
         await safeDelete(env, key);
       }
     }
@@ -618,7 +625,7 @@ export default {
         if (!Array.isArray(body.feeds)) {
           return new Response("Expected { feeds: [...] }", { status: 400 });
         }
-    
+
         const cleaned = body.feeds.map(f => ({
           id: String(f.id),
           url: String(f.url),
@@ -626,10 +633,50 @@ export default {
           kind: String(f.kind),
           schedule: f.schedule || undefined,
         }));
-    
+
+        const configKey = feedsConfigKey(userId);
+
+        // Load existing config to avoid unnecessary writes
+        const existingStr = await env.SIMPLE_RSS_CACHE.get(configKey);
+        let existing = null;
+        if (existingStr) {
+          try {
+            existing = JSON.parse(existingStr);
+          } catch {
+            existing = null;
+          }
+        }
+
+        const normalizeFeeds = (feedsArr) =>
+          Array.isArray(feedsArr)
+            ? [...feedsArr]
+                .map(f => ({
+                  id: String(f.id),
+                  url: String(f.url),
+                  source: String(f.source),
+                  kind: String(f.kind),
+                  schedule: f.schedule || undefined,
+                }))
+                .sort((a, b) => a.id.localeCompare(b.id))
+            : [];
+
+        const newNorm = normalizeFeeds(cleaned);
+        const oldNorm = normalizeFeeds(existing);
+
+        const same =
+          JSON.stringify(newNorm) === JSON.stringify(oldNorm);
+
+        if (same) {
+          // No change, skip KV write
+          return new Response(
+            JSON.stringify({ ok: true, count: cleaned.length, changed: false }),
+            { headers: { "Content-Type": "application/json" } }
+          );
+        }
+
         const putResult = await safePut(
           env,
-          feedsConfigKey(userId),
+          configKey,
           JSON.stringify(cleaned)
         );
         if (!putResult.ok) {
@@ -638,13 +685,13 @@ export default {
             { status: 500, headers: { "Content-Type": "application/json" } }
           );
         }
-    
+
         return new Response(
-          JSON.stringify({ ok: true, count: cleaned.length }),
+          JSON.stringify({ ok: true, count: cleaned.length, changed: true }),
           { headers: { "Content-Type": "application/json" } }
         );
       }
-    
+
       if (request.method === "GET") {
         const feeds = await loadFeeds(env, userId);
         return new Response(JSON.stringify({ feeds }), {
@@ -652,7 +699,7 @@ export default {
           status: 200,
         });
       }
-    
+
       return new Response("Method not allowed", { status: 405 });
     }
 
@@ -715,18 +762,18 @@ export default {
     if (url.pathname === "/test-feed") {
       const feedId = url.searchParams.get("feedId");
       const force = url.searchParams.get("force") === "true";
-    
+
       if (!feedId) {
         return new Response("Missing feedId query param", { status: 400 });
       }
-    
+
       const feed = await getFeedByIdDynamic(env, feedId, userId);
       if (!feed) {
         return new Response(`Unknown feedId: ${feedId}`, { status: 404 });
       }
-    
+
       const fetchResult = await fetchFeedIfDue(env, feed, { force });
-    
+
       const xml = await env.SIMPLE_RSS_CACHE.get(`rss:${feed.id}`);
       if (!xml) {
         return new Response(
@@ -740,9 +787,9 @@ export default {
           { headers: { "Content-Type": "application/json" }, status: 200 }
         );
       }
-    
+
       const items = parseItems(xml, feed);
-    
+
       return new Response(
         JSON.stringify(
           {
@@ -769,7 +816,7 @@ export default {
         headers: { "Content-Type": "application/json" },
       });
     }
-    
+
     // /api/news: aggregate from KV for this user's feeds (last ~2 weeks only)
     if (url.pathname === "/api/news") {
       const articles = await aggregateArticlesFromKV(env, userId);
@@ -837,7 +884,9 @@ export default {
     const counterStr = await env.SIMPLE_RSS_CACHE.get(counterKey);
     const counter = counterStr ? parseInt(counterStr, 10) || 0 : 0;
     const nextCounter = (counter + 1) % 4;
-    await safePut(env, counterKey, String(nextCounter));
+    await safePut(env, counterKey, String(nextCounter), {
+      expirationTtl: ARTICLE_TTL_DAYS * 24 * 60 * 60,
+    });
 
     if (nextCounter === 0) {
       ctx.waitUntil(cleanOldArticles(env, feeds));
