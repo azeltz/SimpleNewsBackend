@@ -6,31 +6,6 @@ const NITTER_BASE = "https://nitter.net";
 const ARTICLE_TTL_DAYS = 14;
 const ARTICLE_TTL_MS = ARTICLE_TTL_DAYS * 24 * 60 * 60 * 1000;
 
-// Delete anything older than 15 days during cleanup
-const ARTICLE_DELETE_DAYS = 15;
-const ARTICLE_DELETE_MS = ARTICLE_DELETE_DAYS * 24 * 60 * 60 * 1000;
-
-// Cleanup batch size (free plan safe)
-const CLEANUP_BATCH_SIZE = 10;
-
-// Short, safe KV key derived from article id (e.g. URL)
-async function articleKey(env, id) {
-  const data = new TextEncoder().encode(id);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  const bytes = new Uint8Array(digest).slice(0, 16); // 128-bit
-  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
-  return `article:${hex}`;
-}
-
-function articleMetaKey(feedId) {
-  // stores JSON { ids: [articleId, ...] } for that feed
-  return `article_meta:${feedId}`;
-}
-
-function articleCleanupStateKey(feedId) {
-  return `article_cleanup_state:${feedId}`;
-}
-
 // Default feeds if KV has no config yet
 const DEFAULT_FEEDS = [
   // ESPN (top sports)
@@ -89,12 +64,22 @@ const DEFAULT_FEEDS = [
   { id: "sec_news",  url: "https://news.google.com/rss/search?q=%22SEC%22+OR+%22Southeastern+Conference%22+college+football+OR+college+basketball&hl=en-US&gl=US&ceid=US:en", source: "news.google.com", kind: "consistent" },
 ];
 
-// New: helper to create per-user config key
 function feedsConfigKey(userId) {
   return userId ? `feeds:config:${userId}` : "feeds:config";
 }
 
-// Load feeds from KV; fall back to defaults
+function feedArticlesKey(feedId) {
+  return `feed_articles:${feedId}`;
+}
+
+function feedMetaKey(feedId) {
+  return `feed_meta:${feedId}`;
+}
+
+const GLOBAL_META_KEY = "meta:global";
+
+// ---- LOAD FEEDS ----
+
 async function loadFeeds(env, userId = null) {
   const stored = await env.SIMPLE_RSS_CACHE.get(feedsConfigKey(userId), { type: "json" });
   if (!stored || !Array.isArray(stored) || stored.length === 0) {
@@ -113,7 +98,7 @@ async function getFeedByIdDynamic(env, id, userId = null) {
   return feeds.find(f => f.id === id) || null;
 }
 
-// ---- KIND-BASED SCHEDULES (interval OR fixed time) ----
+// ---- KIND-BASED SCHEDULES ----
 
 const INTERVALS = {
   breaking:   { minutes: 1 },
@@ -123,8 +108,6 @@ const INTERVALS = {
   consistent: { minutes: 30 },
   periodic:   { minutes: 60 },
   social:     { minutes: 10000000 },
-
-  // time-based kind: once per day at 12:30 UTC
   morning_daily: { timeUTC: "12:30" },
 };
 
@@ -231,7 +214,7 @@ function extractFirstImageSrc(htmlLike) {
 
 function parseItems(xml, feed) {
   const items = [];
-  const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
+  const itemRegex = /<item>([\s\\S]*?)<\\/item>/gi;
   let match;
 
   while ((match = itemRegex.exec(xml)) !== null) {
@@ -345,50 +328,18 @@ async function safeDelete(env, key) {
   }
 }
 
-// Store only NEW, recent articles per-feed and track IDs in a meta key.
-async function upsertArticlesForFeed(env, feed, items) {
-  const now = Date.now();
-  const cutoff = now - ARTICLE_TTL_MS;
-
-  const metaKey = articleMetaKey(feed.id);
-  const metaStr = await env.SIMPLE_RSS_CACHE.get(metaKey);
-  let meta = { ids: [] };
-  if (metaStr) {
+async function updateGlobalMeta(env, updates) {
+  const existingStr = await env.SIMPLE_RSS_CACHE.get(GLOBAL_META_KEY);
+  let meta = {};
+  if (existingStr) {
     try {
-      const parsed = JSON.parse(metaStr);
-      if (parsed && Array.isArray(parsed.ids)) meta = parsed;
-    } catch {}
-  }
-
-  const existingIds = new Set(meta.ids);
-  const newIds = [];
-
-  for (const item of items) {
-    if (!item.id) continue;
-    if (item.publishedTs && item.publishedTs < cutoff) continue;
-
-    if (existingIds.has(item.id)) continue; // already stored, don't overwrite
-
-    const key = await articleKey(env, item.id);
-    const value = JSON.stringify(item);
-
-    const putResult = await safePut(env, key, value, {
-      expirationTtl: ARTICLE_TTL_DAYS * 24 * 60 * 60,
-    });
-    if (putResult.ok) {
-      existingIds.add(item.id);
-      newIds.push(item.id);
+      meta = JSON.parse(existingStr) || {};
+    } catch {
+      meta = {};
     }
   }
-
-  if (newIds.length > 0) {
-    meta.ids = Array.from(existingIds);
-    await safePut(env, metaKey, JSON.stringify(meta), {
-      expirationTtl: ARTICLE_TTL_DAYS * 24 * 60 * 60,
-    });
-  }
-
-  return { ok: true, newCount: newIds.length };
+  meta = { ...meta, ...updates };
+  await safePut(env, GLOBAL_META_KEY, JSON.stringify(meta));
 }
 
 // ---- FETCHING WITH KIND-BASED SCHEDULES ----
@@ -396,12 +347,20 @@ async function upsertArticlesForFeed(env, feed, items) {
 async function fetchFeedIfDue(env, feed, options = {}) {
   const { force = false } = options;
 
-  const now = Date.now();
-  const lastKey = `last:${feed.id}`;
-  const lastStr = await env.SIMPLE_RSS_CACHE.get(lastKey);
-  const last = lastStr ? parseInt(lastStr, 10) : 0;
+  const nowMs = Date.now();
+  const metaKey = feedMetaKey(feed.id);
+  const metaStr = await env.SIMPLE_RSS_CACHE.get(metaKey);
+  let last = 0;
+  let lastSeen = null;
+  if (metaStr) {
+    try {
+      const meta = JSON.parse(metaStr);
+      if (typeof meta.last === "number") last = meta.last;
+      if (typeof meta.lastSeen === "string") lastSeen = meta.lastSeen;
+    } catch {}
+  }
 
-  if (!force && !isFeedDueByKind(feed, last, now)) {
+  if (!force && !isFeedDueByKind(feed, last, nowMs)) {
     console.log(
       JSON.stringify({
         type: "feed_not_due",
@@ -430,45 +389,84 @@ async function fetchFeedIfDue(env, feed, options = {}) {
   const xml = await resp.text();
   console.log("RSS fetched OK", feed.id, xml.slice(0, 200));
 
-  const items = parseItems(xml, feed);
-  const newestId = items.length > 0 ? items[0].id : null;
-  const lastSeenKey = `lastSeen:${feed.id}`;
-  const lastSeen = await env.SIMPLE_RSS_CACHE.get(lastSeenKey);
+  const cutoff = nowMs - ARTICLE_TTL_MS;
+  let items = parseItems(xml, feed);
+  items = items.filter(it => {
+    const ts =
+      it.publishedTs ||
+      (it.publishedAt ? Date.parse(it.publishedAt) : 0);
+    return ts >= cutoff;
+  });
 
-  if (newestId && lastSeen && lastSeen === newestId && !force) {
+  items.sort((a, b) => {
+    const ta =
+      a.publishedTs ||
+      (a.publishedAt ? Date.parse(a.publishedAt) : 0);
+    const tb =
+      b.publishedTs ||
+      (b.publishedAt ? Date.parse(b.publishedAt) : 0);
+    return tb - ta;
+  });
+
+  const newestId = items.length > 0 ? items[0].id : null;
+  const articlesKey = feedArticlesKey(feed.id);
+  const newJson = JSON.stringify(items);
+
+  const existingJson = await env.SIMPLE_RSS_CACHE.get(articlesKey);
+
+  if (existingJson === newJson && !force) {
+    const newMeta = {
+      last: nowMs,
+      lastSeen: newestId || null,
+    };
+
+    await safePut(env, metaKey, JSON.stringify(newMeta), {
+      expirationTtl: ARTICLE_TTL_DAYS * 24 * 60 * 60,
+    });
+
     console.log(
       JSON.stringify({
-        type: "feed_no_change",
+        type: "feed_articles_unchanged",
         ts: new Date().toISOString(),
         feedId: feed.id,
         source: feed.source,
-        newestId,
       })
     );
-    return { ok: false, reason: "no_change", feedId: feed.id, source: feed.source };
+
+    return { ok: true, feedId: feed.id, source: feed.source, unchanged: true };
   }
 
-  // Only add new, recent articles to per-article KV keys.
-  const upsertResult = await upsertArticlesForFeed(env, feed, items);
+  const writeArticles = await safePut(
+    env,
+    articlesKey,
+    newJson,
+    {
+      expirationTtl: ARTICLE_TTL_DAYS * 24 * 60 * 60,
+    }
+  );
 
-  const write1 = await safePut(env, `rss:${feed.id}`, xml, {
-    expirationTtl: 60 * 60 * 12,
-  });
-  const write2 = await safePut(env, lastKey, now.toString());
-  const write3 = newestId
-    ? await safePut(env, lastSeenKey, newestId)
-    : { ok: true };
+  const newMeta = {
+    last: nowMs,
+    lastSeen: newestId || null,
+  };
 
-  if (!write1.ok || !write2.ok || !write3.ok) {
+  const writeMeta = await safePut(
+    env,
+    metaKey,
+    JSON.stringify(newMeta),
+    {
+      expirationTtl: ARTICLE_TTL_DAYS * 24 * 60 * 60,
+    }
+  );
+
+  if (!writeArticles.ok || !writeMeta.ok) {
     return {
       ok: false,
       reason: "kv_write_failed",
       feedId: feed.id,
       source: feed.source,
-      write1,
-      write2,
-      write3,
-      upsertResult,
+      writeArticles,
+      writeMeta,
     };
   }
 
@@ -481,14 +479,15 @@ async function fetchFeedIfDue(env, feed, options = {}) {
       url: feed.url,
       kind: feed.kind,
       newestId,
-      newArticles: upsertResult.newCount,
+      keptArticles: items.length,
     })
   );
 
   return { ok: true, feedId: feed.id, source: feed.source };
 }
 
-// Aggregate per-article keys, only last 14 days
+// ---- AGGREGATE ARTICLES FOR /api/news ----
+
 async function aggregateArticlesFromKV(env, userId = null) {
   const feeds = await loadFeeds(env, userId);
   const now = Date.now();
@@ -497,30 +496,19 @@ async function aggregateArticlesFromKV(env, userId = null) {
   let all = [];
 
   for (const feed of feeds) {
-    const metaKey = articleMetaKey(feed.id);
-    const metaStr = await env.SIMPLE_RSS_CACHE.get(metaKey);
-    if (!metaStr) continue;
+    const key = feedArticlesKey(feed.id);
+    const json = await env.SIMPLE_RSS_CACHE.get(key);
+    if (!json) continue;
 
-    let ids;
+    let items;
     try {
-      const parsed = JSON.parse(metaStr);
-      ids = parsed && Array.isArray(parsed.ids) ? parsed.ids : [];
+      items = JSON.parse(json);
     } catch {
       continue;
     }
+    if (!Array.isArray(items)) continue;
 
-    for (const id of ids) {
-      const key = await articleKey(env, id);
-      const json = await env.SIMPLE_RSS_CACHE.get(key);
-      if (!json) continue;
-
-      let article;
-      try {
-        article = JSON.parse(json);
-      } catch {
-        continue;
-      }
-
+    for (const article of items) {
       const ts =
         article.publishedTs ||
         (article.publishedAt ? Date.parse(article.publishedAt) : 0);
@@ -543,87 +531,17 @@ async function aggregateArticlesFromKV(env, userId = null) {
   return all;
 }
 
-// Cleanup: delete per-article keys older than 15 days, in small batches,
-// only bothering with articles at least 14 days old
-async function cleanOldArticles(env, feeds) {
-  const now = Date.now();
-  const deleteCutoff = now - ARTICLE_DELETE_MS; // 15 days
-  const checkCutoff = now - ARTICLE_TTL_MS;     // 14 days
-
-  for (const feed of feeds) {
-    const metaKey = articleMetaKey(feed.id);
-    const metaStr = await env.SIMPLE_RSS_CACHE.get(metaKey);
-    if (!metaStr) continue;
-
-    let ids;
-    try {
-      const parsed = JSON.parse(metaStr);
-      ids = parsed && Array.isArray(parsed.ids) ? parsed.ids : [];
-    } catch {
-      continue;
-    }
-
-    if (ids.length === 0) continue;
-
-    const stateKey = articleCleanupStateKey(feed.id);
-    const stateStr = await env.SIMPLE_RSS_CACHE.get(stateKey);
-    let startIndex = 0;
-    if (stateStr) {
-      const parsed = parseInt(stateStr, 10);
-      if (!Number.isNaN(parsed)) startIndex = parsed;
-    }
-
-    if (startIndex >= ids.length) startIndex = 0;
-
-    const endIndex = Math.min(startIndex + CLEANUP_BATCH_SIZE, ids.length);
-
-    for (let i = startIndex; i < endIndex; i++) {
-      const id = ids[i];
-      const key = await articleKey(env, id);
-      const json = await env.SIMPLE_RSS_CACHE.get(key);
-      if (!json) continue;
-
-      let article;
-      try {
-        article = JSON.parse(json);
-      } catch {
-        continue;
-      }
-
-      const ts =
-        article.publishedTs ||
-        (article.publishedAt ? Date.parse(article.publishedAt) : 0);
-
-      // Only bother with near-expiry items (older than 14 days)
-      if (ts >= checkCutoff) {
-        continue;
-      }
-
-      if (ts < deleteCutoff) {
-        await safeDelete(env, key);
-      }
-    }
-
-    const nextIndex = endIndex >= ids.length ? 0 : endIndex;
-    await safePut(env, stateKey, String(nextIndex), {
-      expirationTtl: ARTICLE_TTL_DAYS * 24 * 60 * 60,
-    });
-  }
-}
-
 // ---- WORKER HANDLERS ----
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Identify user (optional)
     const userId =
       url.searchParams.get("userId") ||
       request.headers.get("X-SimpleNews-UserId") ||
       null;
 
-    // 1) Sync feeds from app: POST /feeds
     if (url.pathname === "/feeds") {
       if (request.method === "POST") {
         const body = await request.json();
@@ -641,7 +559,6 @@ export default {
 
         const configKey = feedsConfigKey(userId);
 
-        // Load existing config to avoid unnecessary writes
         const existingStr = await env.SIMPLE_RSS_CACHE.get(configKey);
         let existing = null;
         if (existingStr) {
@@ -672,7 +589,6 @@ export default {
           JSON.stringify(newNorm) === JSON.stringify(oldNorm);
 
         if (same) {
-          // No change, skip KV write
           return new Response(
             JSON.stringify({ ok: true, count: cleaned.length, changed: false }),
             { headers: { "Content-Type": "application/json" } }
@@ -708,7 +624,6 @@ export default {
       return new Response("Method not allowed", { status: 405 });
     }
 
-    // 2) Store dynamic keywords: POST /keywords (global for now)
     if (url.pathname === "/keywords" && request.method === "POST") {
       const body = await request.json();
       const keywords = Array.isArray(body.keywords) ? body.keywords : [];
@@ -731,7 +646,6 @@ export default {
       );
     }
 
-    // Manual refresh: only fetch feeds that are due (global)
     if (url.pathname === "/fetch-all") {
       let feeds = await loadFeeds(env, null);
       const dynamicFeed = await loadDynamicKeywordFeed(env);
@@ -745,11 +659,9 @@ export default {
         .map(r => ({ feedId: r.feedId, source: r.source }));
 
       if (pulledFeeds.length > 0) {
-        await safePut(
-          env,
-          "meta:last_snapshot_at",
-          new Date().toISOString()
-        );
+        await updateGlobalMeta(env, {
+          last_snapshot_at: new Date().toISOString(),
+        });
       }
 
       console.log(
@@ -763,7 +675,6 @@ export default {
       return new Response("Fetched due feeds");
     }
 
-    // Test a single feed by id, e.g. /test-feed?feedId=morning_brew&force=true
     if (url.pathname === "/test-feed") {
       const feedId = url.searchParams.get("feedId");
       const force = url.searchParams.get("force") === "true";
@@ -779,21 +690,9 @@ export default {
 
       const fetchResult = await fetchFeedIfDue(env, feed, { force });
 
-      const xml = await env.SIMPLE_RSS_CACHE.get(`rss:${feed.id}`);
-      if (!xml) {
-        return new Response(
-          JSON.stringify({
-            feedId,
-            force,
-            fetchResult,
-            items: [],
-            note: "No XML found in KV for this feed yet",
-          }),
-          { headers: { "Content-Type": "application/json" }, status: 200 }
-        );
-      }
-
-      const items = parseItems(xml, feed);
+      const key = feedArticlesKey(feed.id);
+      const json = await env.SIMPLE_RSS_CACHE.get(key);
+      const items = json ? JSON.parse(json) : [];
 
       return new Response(
         JSON.stringify(
@@ -822,16 +721,21 @@ export default {
       });
     }
 
-    // /api/news: aggregate from KV for this user's feeds (last ~2 weeks only)
     if (url.pathname === "/api/news") {
       const articles = await aggregateArticlesFromKV(env, userId);
-      const lastSnapshotAt = await env.SIMPLE_RSS_CACHE.get("meta:last_snapshot_at");
+      const globalMetaStr = await env.SIMPLE_RSS_CACHE.get(GLOBAL_META_KEY);
+      let lastSnapshotAt = null;
+      if (globalMetaStr) {
+        try {
+          const meta = JSON.parse(globalMetaStr);
+          lastSnapshotAt = meta.last_snapshot_at || null;
+        } catch {}
+      }
       return new Response(JSON.stringify({ articles, lastSnapshotAt }), {
         headers: { "Content-Type": "application/json" },
       });
     }
 
-    // /api/search-news: ad-hoc Google News search (no KV writes)
     if (url.pathname === "/api/search-news" && request.method === "POST") {
       const body = await request.json();
       const keywords = Array.isArray(body.keywords) ? body.keywords : [];
@@ -877,24 +781,9 @@ export default {
       .map(r => ({ feedId: r.feedId, source: r.source }));
 
     if (pulledFeeds.length > 0) {
-      await safePut(
-        env,
-        "meta:last_snapshot_at",
-        new Date().toISOString()
-      );
-    }
-
-    // cleanup only every 4 runs (~once per hour with */15 cron)
-    const counterKey = "meta:cleanup_counter";
-    const counterStr = await env.SIMPLE_RSS_CACHE.get(counterKey);
-    const counter = counterStr ? parseInt(counterStr, 10) || 0 : 0;
-    const nextCounter = (counter + 1) % 4;
-    await safePut(env, counterKey, String(nextCounter), {
-      expirationTtl: ARTICLE_TTL_DAYS * 24 * 60 * 60,
-    });
-
-    if (nextCounter === 0) {
-      ctx.waitUntil(cleanOldArticles(env, feeds));
+      await updateGlobalMeta(env, {
+        last_snapshot_at: new Date().toISOString(),
+      });
     }
 
     console.log(
