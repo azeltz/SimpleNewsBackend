@@ -13,8 +13,13 @@ const ARTICLE_DELETE_MS = ARTICLE_DELETE_DAYS * 24 * 60 * 60 * 1000;
 // Cleanup batch size (free plan safe)
 const CLEANUP_BATCH_SIZE = 10;
 
-function articleKey(id) {
-  return `article:${id}`;
+// Short, safe KV key derived from article id (e.g. URL)
+async function articleKey(env, id) {
+  const data = new TextEncoder().encode(id);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  const bytes = new Uint8Array(digest).slice(0, 16); // 128-bit
+  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+  return `article:${hex}`;
 }
 
 function articleMetaKey(feedId) {
@@ -226,7 +231,7 @@ function extractFirstImageSrc(htmlLike) {
 
 function parseItems(xml, feed) {
   const items = [];
-  const itemRegex = /<item>([\s\\S]*?)<\\/item>/gi;
+  const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
   let match;
 
   while ((match = itemRegex.exec(xml)) !== null) {
@@ -364,7 +369,7 @@ async function upsertArticlesForFeed(env, feed, items) {
 
     if (existingIds.has(item.id)) continue; // already stored, don't overwrite
 
-    const key = articleKey(item.id);
+    const key = await articleKey(env, item.id);
     const value = JSON.stringify(item);
 
     const putResult = await safePut(env, key, value, {
@@ -505,7 +510,7 @@ async function aggregateArticlesFromKV(env, userId = null) {
     }
 
     for (const id of ids) {
-      const key = articleKey(id);
+      const key = await articleKey(env, id);
       const json = await env.SIMPLE_RSS_CACHE.get(key);
       if (!json) continue;
 
@@ -574,7 +579,7 @@ async function cleanOldArticles(env, feeds) {
 
     for (let i = startIndex; i < endIndex; i++) {
       const id = ids[i];
-      const key = articleKey(id);
+      const key = await articleKey(env, id);
       const json = await env.SIMPLE_RSS_CACHE.get(key);
       if (!json) continue;
 
