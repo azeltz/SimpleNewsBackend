@@ -2,6 +2,23 @@
 
 const NITTER_BASE = "https://nitter.net";
 
+// Keep articles for the last 14 days
+const ARTICLE_TTL_DAYS = 14;
+const ARTICLE_TTL_MS = ARTICLE_TTL_DAYS * 24 * 60 * 60 * 1000;
+
+// Delete anything older than 15 days during cleanup
+const ARTICLE_DELETE_DAYS = 15;
+const ARTICLE_DELETE_MS = ARTICLE_DELETE_DAYS * 24 * 60 * 60 * 1000;
+
+function articleKey(id) {
+  return `article:${id}`;
+}
+
+function articleMetaKey(feedId) {
+  // stores JSON { ids: [articleId, ...] } for that feed
+  return `article_meta:${feedId}`;
+}
+
 // Default feeds if KV has no config yet
 const DEFAULT_FEEDS = [
   // ESPN (top sports)
@@ -223,12 +240,16 @@ function parseItems(xml, feed) {
       }
     }
 
+    const publishedAtRaw = extractTag(block, "pubDate");
+    const publishedTs = publishedAtRaw ? Date.parse(publishedAtRaw) : Date.now();
+
     items.push({
       id: link ?? `${feed.id}-${items.length}`,
       title,
       url: link,
       description,
-      publishedAt: extractTag(block, "pubDate"),
+      publishedAt: publishedAtRaw,
+      publishedTs,
       source: feed.source,
       category: null,
       imageURL,
@@ -276,7 +297,7 @@ async function loadDynamicKeywordFeed(env) {
   };
 }
 
-// ---- SAFE KV PUT ----
+// ---- SAFE KV PUT / DELETE ----
 
 async function safePut(env, key, value, options) {
   try {
@@ -293,6 +314,69 @@ async function safePut(env, key, value, options) {
     );
     return { ok: false, error: String(err) };
   }
+}
+
+async function safeDelete(env, key) {
+  try {
+    await env.SIMPLE_RSS_CACHE.delete(key);
+    return { ok: true };
+  } catch (err) {
+    console.log(
+      JSON.stringify({
+        type: "kv_delete_error",
+        key,
+        error: String(err),
+        ts: new Date().toISOString(),
+      })
+    );
+    return { ok: false, error: String(err) };
+  }
+}
+
+// Store only NEW, recent articles per-feed and track IDs in a meta key.
+async function upsertArticlesForFeed(env, feed, items) {
+  const now = Date.now();
+  const cutoff = now - ARTICLE_TTL_MS;
+
+  const metaKey = articleMetaKey(feed.id);
+  const metaStr = await env.SIMPLE_RSS_CACHE.get(metaKey);
+  let meta = { ids: [] };
+  if (metaStr) {
+    try {
+      const parsed = JSON.parse(metaStr);
+      if (parsed && Array.isArray(parsed.ids)) meta = parsed;
+    } catch {}
+  }
+
+  const existingIds = new Set(meta.ids);
+  const newIds = [];
+
+  for (const item of items) {
+    if (!item.id) continue;
+    if (item.publishedTs && item.publishedTs < cutoff) continue;
+
+    if (existingIds.has(item.id)) continue; // already stored, don't overwrite
+
+    const key = articleKey(item.id);
+    const value = JSON.stringify(item);
+
+    const putResult = await safePut(env, key, value, {
+      expirationTtl: ARTICLE_TTL_DAYS * 24 * 60 * 60,
+    });
+    if (putResult.ok) {
+      existingIds.add(item.id);
+      newIds.push(item.id);
+    }
+  }
+
+  if (newIds.length > 0) {
+    meta.ids = Array.from(existingIds);
+    await safePut(env, metaKey, JSON.stringify(meta), {
+      expirationTtl: ARTICLE_TTL_DAYS * 24 * 60 * 60,
+    });
+  }
+
+  return { ok: true, newCount: newIds.length };
 }
 
 // ---- FETCHING WITH KIND-BASED SCHEDULES ----
@@ -352,6 +436,9 @@ async function fetchFeedIfDue(env, feed, options = {}) {
     return { ok: false, reason: "no_change", feedId: feed.id, source: feed.source };
   }
 
+  // Only add new, recent articles to per-article KV keys.
+  const upsertResult = await upsertArticlesForFeed(env, feed, items);
+
   const write1 = await safePut(env, `rss:${feed.id}`, xml, {
     expirationTtl: 60 * 60 * 12,
   });
@@ -369,6 +456,7 @@ async function fetchFeedIfDue(env, feed, options = {}) {
       write1,
       write2,
       write3,
+      upsertResult,
     };
   }
 
@@ -381,31 +469,115 @@ async function fetchFeedIfDue(env, feed, options = {}) {
       url: feed.url,
       kind: feed.kind,
       newestId,
+      newArticles: upsertResult.newCount,
     })
   );
 
   return { ok: true, feedId: feed.id, source: feed.source };
 }
 
-async function aggregateAllFromKV(env, userId = null) {
-  let all = [];
+// Aggregate per-article keys, only last 14 days
+async function aggregateArticlesFromKV(env, userId = null) {
   const feeds = await loadFeeds(env, userId);
+  const now = Date.now();
+  const cutoff = now - ARTICLE_TTL_MS;
+
+  let all = [];
 
   for (const feed of feeds) {
-    const xml = await env.SIMPLE_RSS_CACHE.get(`rss:${feed.id}`);
-    if (!xml) continue;
+    const metaKey = articleMetaKey(feed.id);
+    const metaStr = await env.SIMPLE_RSS_CACHE.get(metaKey);
+    if (!metaStr) continue;
 
-    const items = parseItems(xml, feed);
-    all = all.concat(items);
+    let ids;
+    try {
+      const parsed = JSON.parse(metaStr);
+      ids = parsed && Array.isArray(parsed.ids) ? parsed.ids : [];
+    } catch {
+      continue;
+    }
+
+    for (const id of ids) {
+      const key = articleKey(id);
+      const json = await env.SIMPLE_RSS_CACHE.get(key);
+      if (!json) continue;
+
+      let article;
+      try {
+        article = JSON.parse(json);
+      } catch {
+        continue;
+      }
+
+      const ts =
+        article.publishedTs ||
+        (article.publishedAt ? Date.parse(article.publishedAt) : 0);
+      if (ts < cutoff) continue;
+
+      all.push(article);
+    }
   }
 
   all.sort((a, b) => {
-    const ta = a.publishedAt ? Date.parse(a.publishedAt) : 0;
-    const tb = b.publishedAt ? Date.parse(b.publishedAt) : 0;
+    const ta =
+      a.publishedTs ||
+      (a.publishedAt ? Date.parse(a.publishedAt) : 0);
+    const tb =
+      b.publishedTs ||
+      (b.publishedAt ? Date.parse(b.publishedAt) : 0);
     return tb - ta;
   });
 
   return all;
+}
+
+// Cleanup: delete per-article keys older than 15 days
+async function cleanOldArticles(env, feeds) {
+  const now = Date.now();
+  const cutoff = now - ARTICLE_DELETE_MS;
+
+  for (const feed of feeds) {
+    const metaKey = articleMetaKey(feed.id);
+    const metaStr = await env.SIMPLE_RSS_CACHE.get(metaKey);
+    if (!metaStr) continue;
+
+    let ids;
+    try {
+      const parsed = JSON.parse(metaStr);
+      ids = parsed && Array.isArray(parsed.ids) ? parsed.ids : [];
+    } catch {
+      continue;
+    }
+
+    const keepIds = [];
+
+    for (const id of ids) {
+      const key = articleKey(id);
+      const json = await env.SIMPLE_RSS_CACHE.get(key);
+      if (!json) continue;
+
+      let article;
+      try {
+        article = JSON.parse(json);
+      } catch {
+        continue;
+      }
+
+      const ts =
+        article.publishedTs ||
+        (article.publishedAt ? Date.parse(article.publishedAt) : 0);
+
+      if (ts < cutoff) {
+        await safeDelete(env, key);
+      } else {
+        keepIds.push(id);
+      }
+    }
+
+    await safePut(env, metaKey, JSON.stringify({ ids: keepIds }), {
+      expirationTtl: ARTICLE_TTL_DAYS * 24 * 60 * 60,
+    });
+  }
 }
 
 // ---- WORKER HANDLERS ----
@@ -579,9 +751,9 @@ export default {
       });
     }
     
-    // /api/news: aggregate from KV for this user's feeds
+    // /api/news: aggregate from KV for this user's feeds (last ~2 weeks only)
     if (url.pathname === "/api/news") {
-      const articles = await aggregateAllFromKV(env, userId);
+      const articles = await aggregateArticlesFromKV(env, userId);
       const lastSnapshotAt = await env.SIMPLE_RSS_CACHE.get("meta:last_snapshot_at");
       return new Response(JSON.stringify({ articles, lastSnapshotAt }), {
         headers: { "Content-Type": "application/json" },
@@ -640,6 +812,9 @@ export default {
         new Date().toISOString()
       );
     }
+
+    // run cleanup in the background (schedule this cron around 00:00 local)
+    ctx.waitUntil(cleanOldArticles(env, feeds));
 
     console.log(
       JSON.stringify({
